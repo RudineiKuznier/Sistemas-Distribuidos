@@ -2,33 +2,75 @@ import pika
 import json
 import sys
 
+def pub_pedido_excluido(channel, id_pedido, motivo):
+    payload = {
+        "id_pedido": id_pedido,
+        "motivo": motivo,
+        "status": "EXCLUIDO"
+    }
+    message = json.dumps(payload)
+
+    channel.basic_publish(
+        exchange='eCommerce',
+        routing_key='pedido.excluido',
+        body=message,
+        properties=pika.BasicProperties(
+            content_type='application/json',
+            delivery_mode=pika.DeliveryMode.Persistent
+        )
+    )
+    print(f"    Evento: pedido.excluido (ID: {id_pedido} | Motivo: {motivo})")
+
 connection = pika.BlockingConnection(
     pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
 channel = connection.channel()
 
 channel.exchange_declare(exchange='eCommerce', exchange_type='direct')
 
-result = channel.queue_declare(queue='', exclusive=True)
-queue_name = result.method.queue
+queue_name = 'ms_fila_principal'
 
-severities = sys.argv[1:]
-if not severities:
-    sys.stderr.write("Uso: %s [severities]...\n" % sys.argv[0])
-    sys.exit(1)
+channel.queue_declare(queue=queue_name, durable=True)
 
-for severity in severities:
+eventos = [
+    'pagamento.aprovado',
+    'pagamento.recusado',
+    'pedido.enviado',
+    'pedido.estoque_ok',
+    'estoque.indisponivel'
+]
+
+for routing_key in eventos:
     channel.queue_bind(
-        exchange='eCommerce', queue=queue_name, routing_key=severity)
+        exchange='eCommerce', queue=queue_name, routing_key=routing_key)
 
 print(' [*] Aguardando eventos de eCommerce. Para sair pressione CTRL+C')
 
 def callback(ch, method, properties, body):
     dados = json.loads(body.decode('utf-8'))
+    id_pedido = dados.get('id_pedido')
     print("-" * 40);
     print(f"Routing Key: {method.routing_key}")
-    print(f"ID do Pedido: {dados.get('id_pedido')}")
-    print(f"Data: {dados.get('criacao')}")
-    print(f"Produtos: {dados.get('produtos')}")
+    print(f"ID do Pedido: {id_pedido}")
+
+
+    match method.routing_key:
+        case 'pagamento.aprovado':
+            print(f"    Status: Pedido {id_pedido} -> PAGAMENTO_APROVADO")
+
+        case 'pedido.enviado':
+            print(f"    Status: Pedido {id_pedido} -> PEDIDO ENVIADO")
+
+        case 'pedido.estoque_ok':
+            print(f"    Status: Pedido {id_pedido} -> PEDIDO ESTOQUE OK")
+
+        case 'pagamento.recusado':
+            print(f"    Status: Pedido {id_pedido} -> PAGAMENTO_RECUSADO")
+            pub_pedido_excluido(ch, id_pedido, motivo="Pagamento Recusado")
+
+        case 'estoque.indisponivel':
+            print(f"    Status Atualizado: Pedido {dados.get('id_pedido')} -> ESTOQUE_INDISPONIVEL")
+            pub_pedido_excluido(ch, id_pedido, motivo="Estoque Indisponível") 
+
     print("-" * 40)
 
 

@@ -19,11 +19,11 @@ for binding_key in binding_keys:
     channel.queue_bind(
         exchange='promocoes', queue=queue_name, routing_key=binding_key)
 
-print(' [*] Aguardando promoções. Para sair pressione CTRL+C')
+print('     Aguardando promoções. Para sair pressione CTRL+C')
 
 
 def callback(ch, method, properties, body):
-    print(f" [x] Recebido {method.routing_key}:{body.decode()}")
+    print(f"    Recebido {method.routing_key}:{body.decode()}")
 
 #channel.basic_qos(prefetch_count=1)
 

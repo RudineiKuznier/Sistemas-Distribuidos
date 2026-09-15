@@ -23,7 +23,7 @@ def enviar_evento_ecommerce(routing_key, dados_evento):
         )
     )
 
-    input(f" [x] Enviado para eCommerce {routing_key}: {message}")
+    input(f"    Enviado para eCommerce {routing_key}: {message}")
     connection.close()
     menu()
 
