@@ -1,4 +1,5 @@
 import pika
+import json
 import sys
 
 connection = pika.BlockingConnection(
@@ -22,7 +23,13 @@ for severity in severities:
 print(' [*] Aguardando eventos de eCommerce. Para sair pressione CTRL+C')
 
 def callback(ch, method, properties, body):
-    print(f" [x] {method.routing_key}:{body}")
+    dados = json.loads(body.decode('utf-8'))
+    print("-" * 40);
+    print(f"Routing Key: {method.routing_key}")
+    print(f"ID do Pedido: {dados.get('id_pedido')}")
+    print(f"Data: {dados.get('criacao')}")
+    print(f"Produtos: {dados.get('produtos')}")
+    print("-" * 40)
 
 
 channel.basic_consume(
