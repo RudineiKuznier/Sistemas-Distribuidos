@@ -70,5 +70,6 @@ def menu():
                input("\nOpção inválida. Pressione ENTER para tentar novamente...")
 
         print("*" * 40)
+        
 if __name__ == '__main__':
     menu()
