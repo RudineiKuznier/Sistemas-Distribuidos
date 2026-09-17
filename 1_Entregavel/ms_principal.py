@@ -1,88 +1,232 @@
-import pika
+import os
 import json
-import sys
+import pika
+from datetime import datetime
 
-def iniciar_ms_principal():
+PEDIDOS = {}
+
+def criar_conexao():
     connection = pika.BlockingConnection(
-        pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
-    channel = connection.channel()
+        pika.ConnectionParameters(host="localhost", virtual_host="my_vhost")
+    )
+    return connection
 
-    channel.exchange_declare(exchange='eCommerce', exchange_type='direct')
+# Envia o evento para o exchange "eCommerce" com a routing key especificada
+def enviar_evento_ecommerce(routing_key, dados_evento):
+    connection = criar_conexao()
 
-    queue_name = 'ms_fila_principal'
+    message = json.dumps(dados_evento)
 
-    channel.queue_declare(queue=queue_name, durable=True)
+    try:
+        channel = connection.channel()
+        channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
+        channel.basic_publish(
+            exchange="eCommerce",
+            routing_key=routing_key,
+            body=message,
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=pika.DeliveryMode.Persistent,
+            ),
+        )
+        print(f"    Enviado para eCommerce {routing_key}: {dados_evento}")
+    finally:
+        connection.close()
 
-    eventos = [
-        'pagamento.aprovado',
-        'pagamento.recusado',
-        'pedido.enviado',
-        'pedido.estoque_ok',
-        'estoque.indisponivel'
-    ]
+def visualizar_produtos():
+    print("\nO catálogo é mantido pelo microsserviço Estoque.")
+    print("Consulte o estoque configurado em ms_estoque.py.")
+    input("\nPressione ENTER para voltar ao menu...")
 
-    for routing_key in eventos:
-        channel.queue_bind(
-            exchange='eCommerce', queue=queue_name, routing_key=routing_key)
+# Solicita ao usuário os dados do pedido e envia o evento "pedido.criado" para o exchange "eCommerce"
+def realizar_pedido():
+    limpar_tela()
+    id_pedido = input("ID do Pedido: ").strip()
+    produto = input("Nome do Produto: ").strip()
+    qtd = int(input("Quantidade: ").strip())
 
-    print(' [*] Aguardando eventos de eCommerce. Para sair pressione CTRL+C')
+    data_hora_criacao = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-    channel.basic_qos(prefetch_count=1)
+    payload = {
+        "id_pedido": id_pedido,
+        "produtos": [{"nome": produto, "quantidade": qtd}],
+        "criacao": data_hora_criacao,
+        "status": "CRIADO",
+    }
 
-    channel.basic_consume(
-        queue=queue_name, 
-        on_message_callback=callback,
-        auto_ack=False)
-    channel.start_consuming()
+    PEDIDOS[id_pedido] = payload
+    enviar_evento_ecommerce("pedido.criado", payload)
 
+def obter_pedido(id_pedido):
+    return PEDIDOS.get(id_pedido)
 
-def callback(ch, method, properties, body):
-    dados = json.loads(body.decode('utf-8'))
-    id_pedido = dados.get('id_pedido')
+def listar_pedidos():
+    return list(PEDIDOS.values())
+
+# Envia o evento "pedido.excluido" para o exchange "eCommerce" usando ID do pedido
+def excluir_pedido():
+    id_pedido = input("ID do Pedido: ").strip()
+    pedido = obter_pedido(id_pedido)
+    if pedido is None:
+        input("\nPedido não encontrado. Pressione ENTER para voltar...")
+        return
+
+    pedido["status"] = "EXCLUIDO"
+
+    enviar_evento_ecommerce(
+        "pedido.excluido",
+        {
+            "id_pedido": id_pedido,
+            "produtos": pedido.get("produtos", []),
+            "motivo": "Exclusão solicitada pelo usuário",
+            "status": "EXCLUIDO",
+        },
+    )
+    input("\nPedido excluído. Pressione ENTER para voltar...")
+
+# Lista os pedidos registrados
+def consultar_pedidos():
+    pedidos = listar_pedidos()
+    print("\nPedidos:")
+    if not pedidos:
+        print("Nenhum pedido registrado.")
+    else:
+        for pedido in pedidos:
+            print(
+                f"- {pedido['id_pedido']}: {pedido.get('status', 'SEM_STATUS')} "
+                f"{pedido.get('produtos', [])}"
+            )
+    input("\nPressione ENTER para voltar ao menu...")
+
+# Publica pedido.excluido no exchange eCommerce
+def pub_pedido_excluido(channel, id_pedido, produtos, motivo):
+    payload = {
+        "id_pedido": id_pedido,
+        "produtos": produtos,
+        "motivo": motivo,
+        "status": "EXCLUIDO",
+    }
+    channel.basic_publish(
+        exchange="eCommerce",
+        routing_key="pedido.excluido",
+        body=json.dumps(payload),
+        properties=pika.BasicProperties(
+            content_type="application/json",
+            delivery_mode=pika.DeliveryMode.Persistent,
+        ),
+    )
+    print(f"    Evento: pedido.excluido (ID: {id_pedido} | Motivo: {motivo})")
+
+# Processa eventos recebidos, atualiza o status do pedido e confirma a mensagem.
+def callback(ch, method, body):
+    dados = json.loads(body.decode("utf-8"))
+    id_pedido = dados.get("id_pedido")
     print("-" * 40);
     print(f"Routing Key: {method.routing_key}")
     print(f"ID do Pedido: {id_pedido}")
 
-
     match method.routing_key:
         case 'pagamento.aprovado':
-            print(f"    Status: Pedido {id_pedido} -> PAGAMENTO_APROVADO")
-
-        case 'pedido.enviado':
-            print(f"    Status: Pedido {id_pedido} -> PEDIDO ENVIADO")
-
-        case 'pedido.estoque_ok':
-            print(f"    Status: Pedido {id_pedido} -> PEDIDO ESTOQUE OK")
-
+            status = "PAGAMENTO_APROVADO"
+            motivo = None
         case 'pagamento.recusado':
-            print(f"    Status: Pedido {id_pedido} -> PAGAMENTO_RECUSADO")
-            pub_pedido_excluido(ch, id_pedido, motivo="Pagamento Recusado")
-
+            status = "PAGAMENTO_RECUSADO"
+            motivo = "Pagamento recusado"
+        case 'pedido.enviado':
+            status = "PEDIDO_ENVIADO"
+            motivo = None
+        case 'pedido.estoque_ok':
+            status = "ESTOQUE_OK"
+            motivo = None
         case 'estoque.indisponivel':
-            print(f"    Status Atualizado: Pedido {dados.get('id_pedido')} -> ESTOQUE_INDISPONIVEL")
-            pub_pedido_excluido(ch, id_pedido, motivo="Estoque Indisponível") 
+            status = "ESTOQUE_INDISPONIVEL"
+            motivo = "Estoque indisponível"
+        case _:
+            print(f"Routing key não suportada: {method.routing_key}")
 
-    print("-" * 40)
+    pedido = obter_pedido(id_pedido)
 
+    if pedido is None:
+        pedido = {
+            "id_pedido": id_pedido,
+            "produtos": dados.get("produtos", []),
+            "status": status,
+        }
+    else:
+        pedido["status"] = status
 
-def pub_pedido_excluido(channel, id_pedido, motivo):
-    payload = {
-        "id_pedido": id_pedido,
-        "motivo": motivo,
-        "status": "EXCLUIDO"
-    }
-    message = json.dumps(payload)
+    PEDIDOS[id_pedido] = pedido
 
-    channel.basic_publish(
-        exchange='eCommerce',
-        routing_key='pedido.excluido',
-        body=message,
-        properties=pika.BasicProperties(
-            content_type='application/json',
-            delivery_mode=pika.DeliveryMode.Persistent
+    print(f"Status: Pedido {id_pedido} -> {status}")
+    if motivo is not None:
+        pub_pedido_excluido(
+            ch, id_pedido, pedido.get("produtos", []), motivo
         )
-    )
-    print(f"    Evento: pedido.excluido (ID: {id_pedido} | Motivo: {motivo})")
+    ch.basic_ack(delivery_tag=method.delivery_tag)
 
-if __name__ == '__main__':
-    iniciar_ms_principal()
+# Configura o consumidor para receber eventos do exchange "eCommerce"
+def configurar_consumidor():
+    connection = criar_conexao()
+    channel = connection.channel()
+    channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
+    channel.queue_declare(queue="ms_fila_principal", durable=True)
+
+    for routing_key in (
+        "pagamento.aprovado",
+        "pagamento.recusado",
+        "pedido.enviado",
+        "pedido.estoque_ok",
+        "estoque.indisponivel",
+    ):
+        channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=routing_key)
+
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(
+        queue="ms_fila_principal",
+        on_message_callback=callback,
+        auto_ack=False,
+    )
+    return connection, channel
+
+def limpar_tela():
+    os.system("cls" if os.name == "nt" else "clear")
+
+def menu(connection):
+    while True:
+
+        #processa eventos pendentes antes de exibir o menu
+        connection.process_data_events(time_limit=0)
+
+        limpar_tela()
+        print("*" * 40)
+        print("1. Visualizar Produtos")
+        print("2. Realizar Pedido")
+        print("3. Excluir Pedido")
+        print("4. Consultar Pedidos")
+        print("0. Sair")
+        print("*" * 40)
+
+        opcao = input("Escolha uma opção: ").strip()
+
+        #processa novamente eventos pendentes antes de executar a ação escolhida
+        connection.process_data_events(time_limit=0)
+
+        match opcao:
+            case "1":
+                visualizar_produtos()
+            case "2":
+                realizar_pedido()
+            case "3":
+                excluir_pedido()
+            case "4":
+                consultar_pedidos()
+            case "0":
+                print("Encerrando Microsserviço Principal...")
+                break
+            case _:
+                input("\nOpção inválida. Pressione ENTER para voltar...")
+
+if __name__ == "__main__":
+    connection, channel = configurar_consumidor()
+    menu(connection)
+    connection.close()
