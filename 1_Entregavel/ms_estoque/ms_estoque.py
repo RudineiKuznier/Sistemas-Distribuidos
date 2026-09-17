@@ -1,5 +1,7 @@
 import pika
 import json
+from security import verificar_evento, assinar_evento
+import os
 
 #banco simulado
 ESTOQUE = {
@@ -16,6 +18,18 @@ ESTOQUE = {
 }
 
 RESERVAS = {}
+
+NOME_PRODUTOR = "ms_estoque"
+
+CAMINHO_CHAVE_PRIVADA = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    f"{NOME_PRODUTOR}.pem"
+)
+
+CAMINHO_CHAVES_PUBLICAS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "chaves_publicas"
+)
 
 def iniciar_ms_estoque():
     connection = pika.BlockingConnection(
@@ -41,7 +55,13 @@ def iniciar_ms_estoque():
 
 # Envia eventos para o exchange "eCommerce" com a routing key especificada
 def enviar_evento_estoque(channel, routing_key, dados_evento):
-    message = json.dumps(dados_evento)
+    envelope_assinado = assinar_evento(
+        dados_evento,
+        NOME_PRODUTOR,
+        CAMINHO_CHAVE_PRIVADA
+    )
+    
+    message = json.dumps(envelope_assinado)
     channel.basic_publish(
         exchange='eCommerce',
         routing_key=routing_key,
@@ -98,7 +118,14 @@ def processar_pedido_excluido(id_pedido):
         print(f"    Status: Pedido {id_pedido} -> NENHUMA RESERVA ENCONTRADA PARA DEVOLVER")
 
 def callback(ch, method, properties, body):
-    dados = json.loads(body.decode('utf-8'))
+    envelope = json.loads(body.decode('utf-8'))
+
+    if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+        print(f"    Assinatura inválida! Evento '{method.routing_key}' descartado.")
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        return
+
+    dados = envelope.get('payload', {})
     id_pedido = dados.get('id_pedido')
     itens = dados.get('produtos') or dados.get('itens') or []
     print("-" * 40);
