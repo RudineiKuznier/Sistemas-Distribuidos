@@ -97,7 +97,7 @@ def processar_pedido_excluido(id_pedido):
     else:
         print(f"    Status: Pedido {id_pedido} -> NENHUMA RESERVA ENCONTRADA PARA DEVOLVER")
 
-def callback(ch, method, body):
+def callback(ch, method, properties, body):
     dados = json.loads(body.decode('utf-8'))
     id_pedido = dados.get('id_pedido')
     itens = dados.get('produtos') or dados.get('itens') or []
