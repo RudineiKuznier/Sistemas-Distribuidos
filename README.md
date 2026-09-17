@@ -2,11 +2,8 @@
 
 docker exec -it <nome-do-container> rabbitmqctl add_vhost my_vhost
 
-### (0,2) Processos Consumidores de Promoções
-    python3 emit_promocoes_topic.py promocao.A
-    python3 emit_promocoes_topic.py promocao.B
-    python3 emit_promocoes_topic.py promocao.C
+### 2. Gera a chave privada (2048 bits)
+openssl genrsa -out keys/private_key.pem 2048
 
-### (0,5) Microsserviço Principal  
-## (0,2)
-    python3 receive_ecommerce_direct.py pedido.criado
+### 3. Extrai a chave pública correspondente
+openssl rsa -pubout -in keys/private_key.pem -out keys/public_key.pem

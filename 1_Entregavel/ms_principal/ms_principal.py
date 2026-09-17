@@ -2,8 +2,21 @@ import os
 import json
 import pika
 from datetime import datetime
+from security import verificar_evento, assinar_evento
 
 PEDIDOS = {}
+
+NOME_PRODUTOR = "ms_principal"
+
+CAMINHO_CHAVE_PRIVADA = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    f"{NOME_PRODUTOR}.pem"
+)
+
+CAMINHO_CHAVES_PUBLICAS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "chaves_publicas"
+)
 
 def criar_conexao():
     connection = pika.BlockingConnection(
@@ -14,8 +27,13 @@ def criar_conexao():
 # Envia o evento para o exchange "eCommerce" com a routing key especificada
 def enviar_evento_ecommerce(routing_key, dados_evento):
     connection = criar_conexao()
-
-    message = json.dumps(dados_evento)
+    envelope_assinado = assinar_evento(
+            dados_evento,
+            NOME_PRODUTOR,
+            CAMINHO_CHAVE_PRIVADA
+        )
+    
+    message = json.dumps(envelope_assinado)
 
     try:
         channel = connection.channel()
@@ -29,7 +47,7 @@ def enviar_evento_ecommerce(routing_key, dados_evento):
                 delivery_mode=pika.DeliveryMode.Persistent,
             ),
         )
-        input(f"    Enviado para eCommerce {routing_key}: {message}")
+        #input(f"    Enviado para eCommerce {routing_key}: {message}")
     finally:
         connection.close()
 
@@ -106,10 +124,17 @@ def pub_pedido_excluido(channel, id_pedido, produtos, motivo):
         "motivo": motivo,
         "status": "EXCLUIDO",
     }
+
+    envelope_assinado = assinar_evento(
+        payload,
+        NOME_PRODUTOR,
+        CAMINHO_CHAVE_PRIVADA
+    )
+
     channel.basic_publish(
         exchange="eCommerce",
         routing_key="pedido.excluido",
-        body=json.dumps(payload),
+        body=json.dumps(envelope_assinado),
         properties=pika.BasicProperties(
             content_type="application/json",
             delivery_mode=pika.DeliveryMode.Persistent,
@@ -119,7 +144,14 @@ def pub_pedido_excluido(channel, id_pedido, produtos, motivo):
 
 # Processa eventos recebidos, atualiza o status do pedido e confirma a mensagem.
 def callback(ch, method, properties, body):
-    dados = json.loads(body.decode("utf-8"))
+    envelope = json.loads(body.decode("utf-8"))
+    
+    if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+        print(f"    Assinatura inválida! Evento '{method.routing_key}' descartado.")
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        return
+    
+    dados = envelope.get('payload', {})
     id_pedido = dados.get("id_pedido")
     print("-" * 40);
     print(f"Routing Key: {method.routing_key}")

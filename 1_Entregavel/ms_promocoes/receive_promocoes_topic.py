@@ -1,5 +1,13 @@
 import pika
 import sys
+from security import verificar_evento
+import os
+import json
+
+CAMINHO_CHAVES_PUBLICAS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "chaves_publicas"
+)
 
 def iniciar_ms_promocoes():
     connection = pika.BlockingConnection(
@@ -24,11 +32,17 @@ def iniciar_ms_promocoes():
 
 
     def callback(ch, method, properties, body):
-        print(f"    Recebido {method.routing_key}:{body.decode()}")
+        envelope = json.loads(body.decode('utf-8'))
+        if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+            print(f"    Assinatura inválida/adulterada! Evento '{method.routing_key}' descartado.")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            return
+  
+        promocao = envelope.get('payload', {})
+        print(f"    Recebido {method.routing_key}: {promocao}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        
-    channel.basic_qos(prefetch_count=1)
 
+    channel.basic_qos(prefetch_count=1)
     channel.basic_consume(
         queue=queue_name, on_message_callback=callback, auto_ack=False)
 
