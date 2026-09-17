@@ -29,7 +29,7 @@ def enviar_evento_ecommerce(routing_key, dados_evento):
                 delivery_mode=pika.DeliveryMode.Persistent,
             ),
         )
-        print(f"    Enviado para eCommerce {routing_key}: {dados_evento}")
+        input(f"    Enviado para eCommerce {routing_key}: {message}")
     finally:
         connection.close()
 
@@ -118,7 +118,7 @@ def pub_pedido_excluido(channel, id_pedido, produtos, motivo):
     print(f"    Evento: pedido.excluido (ID: {id_pedido} | Motivo: {motivo})")
 
 # Processa eventos recebidos, atualiza o status do pedido e confirma a mensagem.
-def callback(ch, method, body):
+def callback(ch, method, properties, body):
     dados = json.loads(body.decode("utf-8"))
     id_pedido = dados.get("id_pedido")
     print("-" * 40);
