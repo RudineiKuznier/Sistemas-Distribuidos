@@ -21,11 +21,8 @@ for binding_key in binding_keys:
 
 print('     Aguardando promoções. Para sair pressione CTRL+C')
 
-
 def callback(ch, method, properties, body):
     print(f"    Recebido {method.routing_key}:{body.decode()}")
-
-#channel.basic_qos(prefetch_count=1)
 
 channel.basic_consume(
     queue=queue_name, on_message_callback=callback, auto_ack=True)
