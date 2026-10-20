@@ -17,28 +17,37 @@ import { useState } from "react"
 interface Props {
   open: boolean
   onOpenChange: (open: boolean) => void
+  categorias: string[]
 }
 
-const BADGES = [
-  { id: 1, label: "Promoção 1" },
-  { id: 2, label: "Promoção 2" },
-  { id: 3, label: "Promoção 3" },
-  { id: 4, label: "Promoção 4" },
-]
+export function DialogEmail({ open, onOpenChange, categorias }: Props) {
+  const [selectedBadge, setSelectedBadge] = useState<string[]>([])
 
-export function DialogEmail({ open, onOpenChange }: Props) {
-  function salvar(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    const dados = new FormData(e.currentTarget)
-    console.log(Object.fromEntries(dados))
-    onOpenChange(false) 
-  }
-  const [selectedBadge, setSelectedBadge] = useState<number[]>([]);
-
-  const toggleBadge = (index: number) => {
+  const toggleBadge = (categoria: string) => {
     setSelectedBadge((prev) =>
-    prev.includes(index) ? prev.filter((i) => i !== index) : [...prev, index]
-    );
+      prev.includes(categoria)
+        ? prev.filter((c) => c !== categoria)
+        : [...prev, categoria]
+    )
+  }
+
+  async function salvar(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const email = new FormData(e.currentTarget).get("email")
+
+    try {
+      const res = await fetch("/api/promotions/subscriptions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, categories: selectedBadge }),
+      })
+      if (!res.ok) throw new Error()
+
+      setSelectedBadge([])
+      onOpenChange(false)
+    } catch {
+      console.error("Erro ao salvar a inscrição")
+    }
   }
 
   return (
@@ -48,26 +57,26 @@ export function DialogEmail({ open, onOpenChange }: Props) {
           <DialogHeader>
             <DialogTitle>Promoções</DialogTitle>
             <DialogDescription>
-              
+              Selecione as categorias de promoções que deseja receber
             </DialogDescription>
           </DialogHeader>
 
           <FieldGroup>
             <Field>
-              <Label htmlFor="name-1">Name</Label>
-              <Input id="name-1" name="name"/>
+              <Label htmlFor="email-1">E-mail</Label>
+              <Input id="email-1" name="email" type="email" />
             </Field>
             <Field>
-              <Label htmlFor="username-1">Categorias</Label>
+              <Label>Categorias</Label>
                 <div className="flex w-full flex-wrap justify-center gap-2">
-                  {BADGES.map((badge) => (
+                  {categorias.map((cat) => (
                     <Badge
-                      key={badge.id}
+                      key={cat}
                       className="cursor-pointer"
-                      variant={selectedBadge.includes(badge.id) ? "default" : "outline"}
-                      onClick={() => toggleBadge(badge.id)}
+                      variant={selectedBadge.includes(cat) ? "default" : "outline"}
+                      onClick={() => toggleBadge(cat)}
                     >
-                      {badge.label}
+                      {cat}
                     </Badge>
                   ))}
                 </div>
@@ -75,8 +84,8 @@ export function DialogEmail({ open, onOpenChange }: Props) {
           </FieldGroup>
 
           <DialogFooter>
-            <DialogClose render={<Button type="button" variant="outline">Cancel</Button>} />
-            <Button type="submit">Save changes</Button>
+            <DialogClose render={<Button type="button" variant="outline">Cancelar</Button>} />
+            <Button type="submit">Inscrever</Button>
           </DialogFooter>
         </form>
       </DialogContent>
