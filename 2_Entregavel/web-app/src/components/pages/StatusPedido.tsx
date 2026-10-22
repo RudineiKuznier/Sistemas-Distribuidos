@@ -23,6 +23,7 @@ interface EventoPedido {
   estoqueDevolvido?: boolean
   pagamentoPendente?: boolean
   cancelamentoSolicitado?: boolean
+  notaFiscalEmitida?: boolean
 }
 
 interface Props {
@@ -35,6 +36,7 @@ export function StatusPedido({ orderId, onInventoryChanged }: Props) {
   const [estoqueDevolvido, setEstoqueDevolvido] = useState(false)
   const [pagamentoPendente, setPagamentoPendente] = useState(false)
   const [pagamentoRecusado, setPagamentoRecusado] = useState(false)
+  const [notaFiscalEmitida, setNotaFiscalEmitida] = useState(false)
   const [cancelamentoSolicitado, setCancelamentoSolicitado] = useState(false)
   const [cancelando, setCancelando] = useState(false)
   const [erroCancelamento, setErroCancelamento] = useState<string | null>(null)
@@ -63,6 +65,7 @@ export function StatusPedido({ orderId, onInventoryChanged }: Props) {
       }
       if (devolveuEstoque) setEstoqueDevolvido(true)
       if (evento.pagamentoPendente) setPagamentoPendente(true)
+      if (evento.notaFiscalEmitida) setNotaFiscalEmitida(true)
       if (evento.cancelamentoSolicitado) setCancelamentoSolicitado(true)
       if (precisaAtualizarCatalogo) onInventoryChanged()
     }
@@ -109,6 +112,9 @@ export function StatusPedido({ orderId, onInventoryChanged }: Props) {
           <Badge variant={pagamentoRecusado ? 'destructive' : 'secondary'}>
             {status ? ROTULOS[status] ?? status : 'Aguardando pagamento…'}
           </Badge>
+          {notaFiscalEmitida && (
+            <Badge variant="secondary">Nota Fiscal emitida</Badge>
+          )}
           {pagamentoPendente && !estoqueDevolvido && !pedidoFinalizado && (
             <Button
               variant="destructive"

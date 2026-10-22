@@ -65,7 +65,7 @@ source venv/bin/activate
 python backend/ms_pagamento.py
 ```
 
-O MS Pagamento cria `backend/pagamentos.db` e precisa da chave privada `backend/ms_pagamento.pem` para assinar eventos.
+O MS Pagamento cria `backend/pagamentos.db`.
 
 6. No quarto terminal, inicie o Gateway:
 ```bash
@@ -73,7 +73,13 @@ source venv/bin/activate
 python backend/app.py
 ```
 
-7. No quinto terminal, instale as dependências e inicie o frontend:
+7. No quinto terminal, inicie o MS Entrega:
+```bash
+source venv/bin/activate
+python backend/ms_entrega.py
+```
+
+8. No sexto terminal, instale as dependências e inicie o frontend:
 ```bash
 cd web-app
 pnpm install
@@ -84,6 +90,7 @@ pnpm dev
 - O MS Estoque cria `backend/estoque.db` e disponibiliza o catálogo em [http://localhost:5001/api/products](http://localhost:5001/api/products).
 - O Gateway consulta esse endpoint e expõe a API em [http://localhost:5000/api/products](http://localhost:5000/api/products).
 - Após a reserva, o MS Pagamento solicita uma cobrança ao Mock. O frontend abre o checkout em nova aba; o Mock envia o resultado ao webhook do MS Pagamento.
+- Quando o pagamento é aprovado, o MS Entrega simula a emissão da nota fiscal e o despacho, e publica `pedido.enviado` para o Gateway notificar o frontend via SSE.
 - O cancelamento fica disponível no acompanhamento enquanto o pagamento estiver pendente. O Gateway publica `pedido.excluido` e o Estoque devolve a reserva.
 - Swagger: [http://127.0.0.1:5000/apidocs](http://127.0.0.1:5000/apidocs)
 

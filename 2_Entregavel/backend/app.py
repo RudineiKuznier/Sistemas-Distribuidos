@@ -72,6 +72,7 @@ def processar_evento_pedido(routing_key, dados):
             "checkoutUrl": None,
             "pagamentoPendente": False,
             "cancelamentoSolicitado": False,
+            "notaFiscalEmitida": False,
         })
 
         if routing_key == "pedido.estoque_ok":
@@ -91,6 +92,9 @@ def processar_evento_pedido(routing_key, dados):
         else:
             pedido["status"] = mapeamento_status.get(routing_key, "STATUS_DESCONHECIDO")
 
+        if routing_key == "pedido.enviado":
+            pedido["notaFiscalEmitida"] = dados.get("nota_fiscal_emitida") is True
+
         pedido["routingKey"] = routing_key
         evento_sse = {
             "orderId": id_pedido,
@@ -101,6 +105,7 @@ def processar_evento_pedido(routing_key, dados):
             "checkoutUrl": pedido["checkoutUrl"],
             "pagamentoPendente": pedido["pagamentoPendente"],
             "cancelamentoSolicitado": pedido["cancelamentoSolicitado"],
+            "notaFiscalEmitida": pedido["notaFiscalEmitida"],
             "motivo": dados.get("motivo")
         }
 
@@ -283,6 +288,7 @@ def create_order():
             "checkoutUrl": None,
             "pagamentoPendente": False,
             "cancelamentoSolicitado": False,
+            "notaFiscalEmitida": False,
         }
 
     payload = {
@@ -337,6 +343,7 @@ def sse_order_stream(order_id):
             "checkoutUrl": pedido.get("checkoutUrl"),
             "pagamentoPendente": pedido.get("pagamentoPendente", False),
             "cancelamentoSolicitado": pedido.get("cancelamentoSolicitado", False),
+            "notaFiscalEmitida": pedido.get("notaFiscalEmitida", False),
         }
         yield f"data: {json.dumps(estado_inicial)}\n\n"
 
@@ -403,6 +410,7 @@ def cancelar_pedido(order_id):
             "checkoutUrl": pedido["checkoutUrl"],
             "pagamentoPendente": pedido["pagamentoPendente"],
             "cancelamentoSolicitado": True,
+            "notaFiscalEmitida": pedido["notaFiscalEmitida"],
         }
 
     if not enviar_evento_rabbitmq("pedido.excluido", {
