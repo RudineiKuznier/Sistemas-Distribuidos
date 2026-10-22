@@ -1,0 +1,4 @@
+gateway:   python3 -u app.py
+pagamento: python3 -u ms_pagamento/ms_pagamento.py
+estoque: python3 -u ms_estoque/ms_estoque.py
+entrega: python3 -u ms_entrega/ms_entrega.py

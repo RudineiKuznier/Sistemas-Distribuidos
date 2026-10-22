@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { CardImage } from '@/components/pages/CardImage'
 import { CartBar } from '@/components/pages/CartBar'
 import { DialogEmail } from '@/components/pages/DialogEmail'
@@ -18,8 +18,8 @@ export function Loja() {
   const [orderId, setOrderId] = useState<string | null>(null)
   const [dialogEmail, setDialogEmail] = useState(false)
 
-  useEffect(() => {
-    fetch('/api/products')
+  const carregarProdutos = useCallback(() => {
+    fetch('/api/products', { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) throw new Error('Não foi possível carregar os produtos')
         return res.json()
@@ -28,19 +28,23 @@ export function Loja() {
       .catch((e) => console.error(e.message))
   }, [])
 
+  useEffect(() => {
+    carregarProdutos()
+  }, [carregarProdutos])
+
   const categorias = [...new Set(produtos.map((p) => p.category))]
   const itens = Object.values(carrinho).reduce((soma, q) => soma + q, 0)
 
   function adicionar(p: Produto) {
     setCarrinho((c) => {
       const atual = c[p.id] ?? 0
-      if (atual >= p.stock) return c 
+      if (atual >= p.stock) return c
       return { ...c, [p.id]: atual + 1 }
     })
   }
 
   async function finalizar() {
-    const aba = window.open('', '_blank') 
+    const aba = window.open('', '_blank')
 
     try {
       const res = await fetch('/api/orders', {
@@ -59,16 +63,20 @@ export function Loja() {
       if (aba) aba.location.href = paymentUrl
       setOrderId(orderId) // SSE
       setCarrinho({})
+      setTimeout(carregarProdutos, 700) // garante um refetch após a reserva
     } catch (e) {
       aba?.close()
       console.error(e instanceof Error ? e.message : 'Erro ao criar o pedido')
     }
   }
+
   return (
     <>
-      <main className="mx-auto max-w-7xl p-4 pb-24">
-        {orderId && <StatusPedido orderId={orderId} />}
-         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <main className="mx-auto max-w-7xl space-y-8 p-4 pb-24">
+        {orderId && (
+          <StatusPedido orderId={orderId} onStatusChange={carregarProdutos} />
+        )}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {produtos.map((p) => (
             <CardImage
               key={p.id}
@@ -76,6 +84,7 @@ export function Loja() {
               descr={`${p.category} · R$ ${p.price.toFixed(2)}`}
               quantidade={p.stock}
               onAdd={() => adicionar(p)}
+               disabled={p.stock === 0}
             />
           ))}
         </div>

@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import uuid
 import queue
@@ -17,6 +18,25 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 app = Flask(__name__)
 CORS(app) 
 
+def carregar_produtos():
+    caminho_csv = os.path.join(os.path.dirname(__file__), "database.csv")
+    produtos = []
+
+    if not os.path.exists(caminho_csv):
+        print(f"[ERRO] Ficheiro {caminho_csv} não encontrado.")
+        return produtos
+
+    with open(caminho_csv, mode='r', encoding='utf-8-sig') as arquivo:
+        leitor = csv.DictReader(arquivo)
+        for linha in leitor:
+            produtos.append({
+                "id": linha["id"],
+                "name": linha["name"],
+                "price": float(linha["price"]),     
+                "category": linha["category"],
+                "stock": int(linha["stock"])     
+            })
+    return produtos
 
 swagger_template = {
     "swagger": "2.0",
@@ -29,13 +49,6 @@ swagger_template = {
 
 swagger = Swagger(app, template=swagger_template)
 
-PRODUTOS = [
-    {"id": "camisa", "name": "Camisa Polo", "price": 89.90, "category": "Vestuário", "stock": 100},
-    {"id": "tenis", "name": "Tênis Esportivo", "price": 299.90, "category": "Calçados", "stock": 2},
-    {"id": "calca", "name": "Calça Jeans", "price": 149.90, "category": "Vestuário", "stock": 0},
-    {"id": "mochila", "name": "Mochila Escolar", "price": 120.00, "category": "Acessórios", "stock": 1},
-    {"id": "casaco", "name": "Casaco de Frio", "price": 250.00, "category": "Vestuário", "stock": 9},
-]
 
 PEDIDOS = {}
 
@@ -64,7 +77,6 @@ def criar_conexao_rabbitmq():
     )
 
 def enviar_evento_rabbitmq(routing_key, dados_evento):
-    """Assina o payload e publica no exchange 'eCommerce' do RabbitMQ."""
     try:
         connection = criar_conexao_rabbitmq()
         channel = connection.channel()
@@ -149,7 +161,6 @@ def consumidor_rabbitmq_worker():
             threading.Event().wait(5)
 
 threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensagens Rabbit segundo plano
--
 
 @app.route('/api/products', methods=['GET'])
 def get_products():
@@ -182,7 +193,8 @@ def get_products():
                 type: integer
                 example: 100
     """
-    return jsonify(PRODUTOS), 200
+    #return jsonify([p for p in carregar_produtos() if p["stock"] > 0]), 200
+    return jsonify(carregar_produtos()), 200
 
 
 @app.route('/api/orders', methods=['POST'])
@@ -261,6 +273,20 @@ def create_order():
         "paymentUrl": payment_url
     }), 201
 
+@app.route('/api/orders/<order_id>', methods=['DELETE'])
+def delete_order(order_id):
+    if order_id not in PEDIDOS:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+
+    enviar_evento_rabbitmq("pedido.excluido", {"id_pedido": order_id})
+    PEDIDOS[order_id]["status"] = "CANCELADO"
+    notificar_clientes_sse(order_id, {
+        "orderId": order_id,
+        "status": "Pedido Cancelado",
+        "routingKey": "pedido.excluido"
+    })
+    return jsonify({"success": True}), 200
+
 
 @app.route('/api/orders/<order_id>/events', methods=['GET'])
 def sse_order_stream(order_id):
@@ -332,16 +358,12 @@ def handle_payment_result(order_id):
     data = request.get_json() or {}
     resultado = data.get('result')
 
-    aprovado = (resultado == "APROVADO")
-    routing_key = 'pagamento.aprovado' if aprovado else 'pagamento.recusado'
-
     payload = {
         "id_pedido": order_id,
-        "status": "PAGAMENTO_APROVADO" if aprovado else "PAGAMENTO_RECUSADO",
-        "motivo": None if aprovado else "Pagamento recusado na simulação"
+        "resultado": resultado
     }
 
-    enviar_evento_rabbitmq(routing_key, payload)
+    enviar_evento_rabbitmq("pagamento.resultado", payload)
 
     return jsonify({"success": True}), 200
 
