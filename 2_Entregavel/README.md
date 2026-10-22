@@ -33,6 +33,18 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+Configure o arquivo `.env` na raiz de `2_Entregavel` com a chave do Resend,
+um remetente verificado no Resend e um token administrativo para campanhas:
+```env
+RESEND_API_KEY=
+RESEND_FROM_EMAIL=
+PROMOTIONS_ADMIN_TOKEN=
+STOCK_API_URL=http://localhost:5001/api/products
+```
+
+Preencha os valores antes de enviar campanhas. O `.env` é ignorado pelo Git;
+não inclua credenciais em commits.
+
 2. Inicie o RabbitMQ. Execute estes comandos na primeira vez para criar e configurar o container:
 ```bash
 docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:4-management
@@ -79,7 +91,15 @@ source venv/bin/activate
 python backend/ms_entrega.py
 ```
 
-8. No sexto terminal, instale as dependências e inicie o frontend:
+8. No sexto terminal, inicie o MS Promoções:
+```bash
+source venv/bin/activate
+python backend/ms_promocoes.py
+```
+
+O MS Promoções cria `backend/promocoes.db`.
+
+9. No sétimo terminal, instale as dependências e inicie o frontend:
 ```bash
 cd web-app
 pnpm install
@@ -91,8 +111,25 @@ pnpm dev
 - O Gateway consulta esse endpoint e expõe a API em [http://localhost:5000/api/products](http://localhost:5000/api/products).
 - Após a reserva, o MS Pagamento solicita uma cobrança ao Mock. O frontend abre o checkout em nova aba; o Mock envia o resultado ao webhook do MS Pagamento.
 - Quando o pagamento é aprovado, o MS Entrega simula a emissão da nota fiscal e o despacho, e publica `pedido.enviado` para o Gateway notificar o frontend via SSE.
+- O Gateway publica inscrições e cancelamentos no RabbitMQ; o MS Promoções persiste os interesses e envia campanhas segmentadas pelo Resend.
+- Para solicitar uma campanha manualmente, envie `POST /api/promotions/campaigns` com `Authorization: Bearer <PROMOTIONS_ADMIN_TOKEN>` e JSON como `{"category":"Vestuário","discount_percent":20}`. A campanha escolhe um produto disponível daquela categoria e notifica os inscritos.
 - O cancelamento fica disponível no acompanhamento enquanto o pagamento estiver pendente. O Gateway publica `pedido.excluido` e o Estoque devolve a reserva.
 - Swagger: [http://127.0.0.1:5000/apidocs](http://127.0.0.1:5000/apidocs)
 
 ### Frontend
 - [http://localhost:5173](http://localhost:5173)
+
+### Promoções
+Enviando uma campanha manual:
+
+``` bash
+read -rsp "Token administrativo: " PROMOTIONS_ADMIN_TOKEN
+echo
+
+curl -i -X POST http://localhost:5000/api/promotions/campaigns \
+  -H "Authorization: Bearer $PROMOTIONS_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"category":"Acessórios","discount_percent":20}'
+
+unset PROMOTIONS_ADMIN_TOKEN
+```

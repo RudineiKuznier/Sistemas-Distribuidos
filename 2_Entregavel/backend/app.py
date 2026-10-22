@@ -2,18 +2,17 @@ import os
 import json
 import uuid
 import queue
+import secrets
 import threading
 import pika
 import requests
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from flasgger import Swagger
-import resend
 from dotenv import load_dotenv
 from security import verificar_evento, assinar_evento
 
 load_dotenv()
-resend.api_key = os.getenv("RESEND_API_KEY")
 
 app = Flask(__name__)
 CORS(app) 
@@ -446,32 +445,103 @@ def subscribe_promotions():
               items:
                 type: string
     responses:
-      200:
-        description: Inscrição processada.
+      202:
+        description: Inscrição enviada para processamento.
       400:
-        description: E-mail não informado.
-      500:
-        description: Falha ao enviar o e-mail.
+        description: E-mail ou categorias inválidos.
+      503:
+        description: Não foi possível publicar a inscrição.
     """
     data = request.get_json() or {}
     email = data.get('email')
     categories = data.get('categories', [])
 
-    if not email:
-        return jsonify({"error": "E-mail é obrigatório"}), 400
+    if not isinstance(email, str) or not email.strip() or "@" not in email:
+        return jsonify({"error": "E-mail inválido."}), 400
+    if (
+        not isinstance(categories, list)
+        or any(not isinstance(category, str) or not category.strip() for category in categories)
+    ):
+        return jsonify({"error": "Categorias inválidas."}), 400
+
+    payload = {
+        "email": email.strip().lower(),
+        "categories": sorted(set(category.strip() for category in categories)),
+    }
+    if not enviar_evento_rabbitmq("interesse.promocao", payload):
+        return jsonify({"error": "Não foi possível publicar a inscrição."}), 503
+    return jsonify({"message": "Inscrição enviada para processamento."}), 202
+
+@app.route('/api/promotions/subscriptions', methods=['DELETE'])
+def unsubscribe_promotions():
+    data = request.get_json() or {}
+    email = data.get('email')
+    if not isinstance(email, str) or not email.strip() or "@" not in email:
+        return jsonify({"error": "E-mail inválido."}), 400
+
+    if not enviar_evento_rabbitmq("interesse.promocao.cancelado", {
+        "email": email.strip().lower()
+    }):
+        return jsonify({"error": "Não foi possível publicar o cancelamento."}), 503
+    return jsonify({"message": "Cancelamento enviado para processamento."}), 202
+
+@app.route('/api/promotions/campaigns', methods=['POST'])
+def create_promotion_campaign():
+    token_configurado = os.getenv("PROMOTIONS_ADMIN_TOKEN")
+    token_recebido = request.headers.get("Authorization", "")
+    if not token_configurado:
+        return jsonify({"error": "PROMOTIONS_ADMIN_TOKEN não está configurado."}), 503
+    if not secrets.compare_digest(token_recebido, f"Bearer {token_configurado}"):
+        return jsonify({"error": "Acesso não autorizado."}), 401
+
+    data = request.get_json() or {}
+    category = data.get("category")
+    discount_percent = data.get("discount_percent")
+    if (
+        not isinstance(category, str)
+        or not category.strip()
+        or not isinstance(discount_percent, int)
+        or isinstance(discount_percent, bool)
+        or not 1 <= discount_percent <= 90
+    ):
+        return jsonify({
+            "error": "Informe uma categoria e um desconto inteiro entre 1 e 90."
+        }), 400
 
     try:
-        if os.getenv("RESEND_API_KEY"):
-            resend.Emails.send({
-                "from": "onboarding@resend.dev",
-                "to": email,
-                "subject": "Inscrição de Promoções Confirmada!",
-                "html": f"<p>Você se inscreveu para receber ofertas nas categorias: <strong>{', '.join(categories) if categories else 'Geral'}</strong></p>"
-            })
-        return jsonify({"message": "Inscrição realizada com sucesso!"}), 200
-    except Exception as e:
-        print(f"[Resend Error] {e}")
-        return jsonify({"error": "Falha ao enviar e-mail"}), 500
+        response = requests.get("http://localhost:5001/api/products", timeout=3)
+        response.raise_for_status()
+        categorias_disponiveis = {
+            produto.get("category")
+            for produto in response.json()
+            if isinstance(produto, dict) and produto.get("stock", 0) > 0
+        }
+    except (requests.RequestException, ValueError) as erro:
+        print(f"[MS Estoque Error] {erro}")
+        return jsonify({"error": "Não foi possível validar a categoria no estoque."}), 502
+
+    category = category.strip()
+    if category not in categorias_disponiveis:
+        return jsonify({
+            "error": "Categoria não encontrada ou sem produtos disponíveis no estoque."
+        }), 400
+
+    if not os.getenv("RESEND_API_KEY") or not os.getenv("RESEND_FROM_EMAIL"):
+        return jsonify({
+            "error": "Configure RESEND_API_KEY e RESEND_FROM_EMAIL antes da campanha."
+        }), 503
+
+    campaign_id = str(uuid.uuid4())
+    if not enviar_evento_rabbitmq("promocao.solicitada", {
+        "campaign_id": campaign_id,
+        "category": category,
+        "discount_percent": discount_percent,
+    }):
+        return jsonify({"error": "Não foi possível publicar a campanha."}), 503
+    return jsonify({
+        "campaignId": campaign_id,
+        "message": "Campanha enviada para processamento.",
+    }), 202
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { CardImage } from '@/components/pages/CardImage'
 import { CartBar } from '@/components/pages/CartBar'
 import { DialogEmail } from '@/components/pages/DialogEmail'
+import { PromotionsBar } from '@/components/pages/PromotionsBar'
 import { StatusPedido } from '@/components/pages/StatusPedido'
 
 interface Produto {
@@ -74,7 +75,9 @@ export function Loja() {
   }
   return (
     <>
-      <main className="mx-auto max-w-7xl p-4 pb-24">
+      <PromotionsBar onAbrirPromocoes={() => setDialogEmail(true)} />
+
+      <main className="mx-auto max-w-7xl p-4 pt-20 pb-24">
         {orderId && (
           <StatusPedido
             key={orderId}
@@ -99,7 +102,6 @@ export function Loja() {
         itens={itens}
         onFinalizar={finalizar}
         onEsvaziarCarrinho={() => setCarrinho({})}
-        onAbrirEmail={() => setDialogEmail(true)}
       />
 
       <DialogEmail

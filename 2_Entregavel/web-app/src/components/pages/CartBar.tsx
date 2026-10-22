@@ -4,10 +4,9 @@ interface Props {
   itens: number
   onFinalizar: () => void
   onEsvaziarCarrinho: () => void
-  onAbrirEmail: () => void
 }
 
-export function CartBar({ itens, onFinalizar, onEsvaziarCarrinho, onAbrirEmail }: Props) {
+export function CartBar({ itens, onFinalizar, onEsvaziarCarrinho }: Props) {
   if (itens === 0) return null
 
   return (
@@ -19,9 +18,6 @@ export function CartBar({ itens, onFinalizar, onEsvaziarCarrinho, onAbrirEmail }
           Esvaziar carrinho
         </Button>
         <Button onClick={onFinalizar}>Finalizar e pagar</Button>
-        <Button variant="outline" onClick={onAbrirEmail}>
-          Promoções
-        </Button>
       </div>
     </div>
   )
