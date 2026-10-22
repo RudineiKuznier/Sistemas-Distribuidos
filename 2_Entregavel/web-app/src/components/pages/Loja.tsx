@@ -98,6 +98,7 @@ export function Loja() {
       <CartBar
         itens={itens}
         onFinalizar={finalizar}
+        onEsvaziarCarrinho={() => setCarrinho({})}
         onAbrirEmail={() => setDialogEmail(true)}
       />
 

@@ -51,13 +51,21 @@ source venv/bin/activate
 python backend/ms_estoque.py
 ```
 
-4. No segundo terminal, inicie o Gateway:
+4. No segundo terminal, inicie o MS Pagamento:
+```bash
+source venv/bin/activate
+python backend/ms_pagamento.py
+```
+
+O MS Pagamento cria `backend/pagamentos.db` e precisa da chave privada `backend/ms_pagamento.pem` para assinar eventos.
+
+5. No terceiro terminal, inicie o Gateway:
 ```bash
 source venv/bin/activate
 python backend/app.py
 ```
 
-5. No terceiro terminal, instale as dependências e inicie o frontend:
+6. No quarto terminal, instale as dependências e inicie o frontend:
 ```bash
 cd web-app
 pnpm install

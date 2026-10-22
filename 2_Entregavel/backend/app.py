@@ -18,7 +18,6 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 app = Flask(__name__)
 CORS(app) 
 
-
 swagger_template = {
     "swagger": "2.0",
     "info": {
@@ -31,6 +30,7 @@ swagger_template = {
 swagger = Swagger(app, template=swagger_template)
 
 PEDIDOS = {}
+PEDIDOS_LOCK = threading.Lock()
 
 sse_subscribers = {}
 
@@ -60,32 +60,34 @@ def processar_evento_pedido(routing_key, dados):
         "estoque.indisponivel": "Estoque Indisponível",
     }
 
-    pedido = PEDIDOS.setdefault(id_pedido, {
-        "status": "Aguardando atualizações",
-        "routingKey": None,
-        "estoqueConfirmado": False,
-        "estoqueDevolvido": False,
-    })
+    # Atualiza o status do pedido com base na routing key recebida e notifica os clientes SSE
+    with PEDIDOS_LOCK:
+        pedido = PEDIDOS.setdefault(id_pedido, {
+            "status": "Aguardando atualizações",
+            "routingKey": None,
+            "estoqueConfirmado": False,
+            "estoqueDevolvido": False,
+        })
 
-    if routing_key == "pedido.estoque_ok":
-        pedido["status"] = mapeamento_status[routing_key]
-        pedido["estoqueConfirmado"] = True
-    elif routing_key == "estoque.devolvido":
-        pedido["estoqueDevolvido"] = True
-    else:
-        pedido["status"] = mapeamento_status.get(routing_key, "STATUS_DESCONHECIDO")
+        if routing_key == "pedido.estoque_ok":
+            pedido["status"] = mapeamento_status[routing_key]
+            pedido["estoqueConfirmado"] = True
+        elif routing_key == "estoque.devolvido":
+            pedido["estoqueDevolvido"] = True
+        else:
+            pedido["status"] = mapeamento_status.get(routing_key, "STATUS_DESCONHECIDO")
 
-    pedido["routingKey"] = routing_key
+        pedido["routingKey"] = routing_key
+        evento_sse = {
+            "orderId": id_pedido,
+            "status": pedido["status"],
+            "routingKey": routing_key,
+            "estoqueConfirmado": pedido["estoqueConfirmado"],
+            "estoqueDevolvido": pedido["estoqueDevolvido"],
+            "motivo": dados.get("motivo")
+        }
 
-    notificar_clientes_sse(id_pedido, {
-        "orderId": id_pedido,
-        "status": pedido["status"],
-        "routingKey": routing_key,
-        "estoqueConfirmado": pedido["estoqueConfirmado"],
-        "estoqueDevolvido": pedido["estoqueDevolvido"],
-        "motivo": dados.get("motivo")
-    })
-
+    notificar_clientes_sse(id_pedido, evento_sse)
 
 def criar_conexao_rabbitmq():
     return pika.BlockingConnection(
@@ -94,6 +96,7 @@ def criar_conexao_rabbitmq():
 
 def enviar_evento_rabbitmq(routing_key, dados_evento):
     """Assina o payload e publica no exchange 'eCommerce' do RabbitMQ."""
+    connection = None
     try:
         connection = criar_conexao_rabbitmq()
         channel = connection.channel()
@@ -110,9 +113,13 @@ def enviar_evento_rabbitmq(routing_key, dados_evento):
                 delivery_mode=pika.DeliveryMode.Persistent
             )
         )
-        connection.close()
+        return True
     except Exception as e:
         print(f"[RabbitMQ Producer Error] {e}")
+        return False
+    finally:
+        if connection and connection.is_open:
+            connection.close()
 
 def consumidor_rabbitmq_worker():
     """Worker em background que consome respostas dos microsserviços de Estoque e Pagamento."""
@@ -162,13 +169,13 @@ threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensag
 @app.route('/api/products', methods=['GET'])
 def get_products():
     """
-    Obter catálogo de produtos
+    Listar produtos disponíveis
     ---
     tags:
       - Catálogo e Pedidos
     responses:
       200:
-        description: Retorna a lista de produtos do catálogo
+        description: Produtos disponíveis em estoque.
         schema:
           type: array
           items:
@@ -176,19 +183,16 @@ def get_products():
             properties:
               id:
                 type: string
-                example: "camisa"
               name:
                 type: string
-                example: "Camisa Polo"
               price:
                 type: number
-                example: 89.90
               category:
                 type: string
-                example: "Vestuário"
               stock:
                 type: integer
-                example: 100
+      502:
+        description: MS Estoque indisponível.
     """
     try:
         response = requests.get("http://localhost:5001/api/products", timeout=3)
@@ -198,11 +202,10 @@ def get_products():
         print(f"[MS Estoque Error] {e}")
         return jsonify({"error": "Não foi possível consultar o estoque"}), 502
 
-
 @app.route('/api/orders', methods=['POST'])
 def create_order():
     """
-    Criar pedido e publicar 'pedido.criado' no RabbitMQ
+    Criar pedido
     ---
     tags:
       - Catálogo e Pedidos
@@ -222,24 +225,22 @@ def create_order():
                 properties:
                   productId:
                     type: string
-                    example: "camisa"
                   quantity:
                     type: integer
-                    example: 2
     responses:
       201:
-        description: Pedido criado com sucesso. Retorna orderId e a URL do mock de pagamento.
+        description: Pedido criado e enviado para processamento.
         schema:
           type: object
           properties:
             orderId:
               type: string
-              example: "p101"
             paymentUrl:
               type: string
-              example: "http://localhost:5173/pagamento?orderId=p101"
       400:
-        description: Nenhum item informado
+        description: Itens não informados.
+      503:
+        description: Não foi possível publicar o pedido.
     """
     data = request.get_json() or {}
     items = data.get('items', [])
@@ -254,21 +255,23 @@ def create_order():
         for item in items
     ]
 
-    PEDIDOS[order_id] = {
-        "id_pedido": order_id,
-        "produtos": produtos_formatados,
-        "status": "Pedido criado",
-        "routingKey": None,
-        "estoqueConfirmado": False,
-        "estoqueDevolvido": False,
-    }
+    with PEDIDOS_LOCK:
+        PEDIDOS[order_id] = {
+            "status": "Pedido criado",
+            "routingKey": None,
+            "estoqueConfirmado": False,
+            "estoqueDevolvido": False,
+        }
 
     payload = {
         "id_pedido": order_id,
         "produtos": produtos_formatados,
         "status": "CRIADO"
     }
-    enviar_evento_rabbitmq("pedido.criado", payload)
+    if not enviar_evento_rabbitmq("pedido.criado", payload):
+        with PEDIDOS_LOCK:
+            PEDIDOS.pop(order_id, None)
+        return jsonify({"error": "Não foi possível publicar o pedido."}), 503
 
     frontend_origin = request.headers.get("Origin", "http://localhost:5173")
     payment_url = f"{frontend_origin}/pagamento?orderId={order_id}"
@@ -278,11 +281,10 @@ def create_order():
         "paymentUrl": payment_url
     }), 201
 
-
 @app.route('/api/orders/<order_id>/events', methods=['GET'])
 def sse_order_stream(order_id):
     """
-    Canal de acompanhamento do pedido em tempo real (SSE)
+    Acompanhar atualizações do pedido (SSE)
     ---
     tags:
       - Acompanhamento de Pedidos (SSE)
@@ -291,12 +293,11 @@ def sse_order_stream(order_id):
         in: path
         type: string
         required: true
-        description: ID do pedido a ser acompanhado
     produces:
       - text/event-stream
     responses:
       200:
-        description: Conexão SSE estabelecida com sucesso
+        description: Eventos JSON com status, routingKey e estado do estoque.
     """
     def event_stream():
         q = queue.Queue()
@@ -323,11 +324,10 @@ def sse_order_stream(order_id):
 
     return Response(event_stream(), mimetype="text/event-stream")
 
-
 @app.route('/api/payments/<order_id>/result', methods=['POST'])
 def handle_payment_result(order_id):
     """
-    Processar resultado vindo do Mock de Pagamento do Frontend
+    Registrar resultado do pagamento
     ---
     tags:
       - Pagamento
@@ -336,7 +336,6 @@ def handle_payment_result(order_id):
         in: path
         type: string
         required: true
-        description: ID do pedido
       - in: body
         name: body
         required: true
@@ -348,32 +347,46 @@ def handle_payment_result(order_id):
             result:
               type: string
               enum: ["APROVADO", "RECUSADO"]
-              example: "APROVADO"
     responses:
       200:
-        description: Resultado publicado no RabbitMQ com sucesso
+        description: Resultado registrado; repetição idêntica é idempotente.
+      400:
+        description: Resultado inválido.
+      404:
+        description: Pedido não encontrado.
+      409:
+        description: Pagamento pendente ou finalizado com resultado oposto.
+      502:
+        description: MS Pagamento indisponível.
+      503:
+        description: Não foi possível publicar o resultado.
     """
     data = request.get_json() or {}
     resultado = data.get('result')
 
-    aprovado = (resultado == "APROVADO")
-    routing_key = 'pagamento.aprovado' if aprovado else 'pagamento.recusado'
+    if resultado not in ("APROVADO", "RECUSADO"):
+        return jsonify({"error": "Resultado deve ser APROVADO ou RECUSADO."}), 400
 
-    payload = {
-        "id_pedido": order_id,
-        "status": "PAGAMENTO_APROVADO" if aprovado else "PAGAMENTO_RECUSADO",
-        "motivo": None if aprovado else "Pagamento recusado na simulação"
-    }
+    with PEDIDOS_LOCK:
+        pedido = PEDIDOS.get(order_id)
+        if pedido is None:
+            return jsonify({"error": "Pedido não encontrado."}), 404
 
-    enviar_evento_rabbitmq(routing_key, payload)
-
-    return jsonify({"success": True}), 200
-
+    try:
+        response = requests.post(
+            f"http://localhost:5002/api/payments/{order_id}/result",
+            json={"result": resultado},
+            timeout=5,
+        )
+        return jsonify(response.json()), response.status_code
+    except requests.RequestException as e:
+        print(f"[MS Pagamento Error] {e}")
+        return jsonify({"error": "Não foi possível consultar o MS Pagamento."}), 502
 
 @app.route('/api/promotions/subscriptions', methods=['POST'])
 def subscribe_promotions():
     """
-    Inscrição de promoções via e-mail (Resend)
+    Inscrever e-mail para promoções
     ---
     tags:
       - Inscrição de Promoções
@@ -388,19 +401,17 @@ def subscribe_promotions():
           properties:
             email:
               type: string
-              example: "cliente@exemplo.com"
             categories:
               type: array
               items:
                 type: string
-              example: ["Vestuário", "Acessórios"]
     responses:
       200:
-        description: Inscrição confirmada e e-mail enviado via Resend
+        description: Inscrição processada.
       400:
-        description: E-mail não informado
+        description: E-mail não informado.
       500:
-        description: Erro ao disparar o e-mail via Resend
+        description: Falha ao enviar o e-mail.
     """
     data = request.get_json() or {}
     email = data.get('email')
@@ -421,7 +432,6 @@ def subscribe_promotions():
     except Exception as e:
         print(f"[Resend Error] {e}")
         return jsonify({"error": "Falha ao enviar e-mail"}), 500
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

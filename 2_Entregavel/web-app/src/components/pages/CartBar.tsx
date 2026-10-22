@@ -3,10 +3,11 @@ import { Button } from '@/components/ui/button'
 interface Props {
   itens: number
   onFinalizar: () => void
+  onEsvaziarCarrinho: () => void
   onAbrirEmail: () => void
 }
 
-export function CartBar({ itens, onFinalizar, onAbrirEmail }: Props) {
+export function CartBar({ itens, onFinalizar, onEsvaziarCarrinho, onAbrirEmail }: Props) {
   if (itens === 0) return null
 
   return (
@@ -14,6 +15,9 @@ export function CartBar({ itens, onFinalizar, onAbrirEmail }: Props) {
       <span>{itens} itens</span>
 
       <div className="flex gap-2">
+        <Button variant="outline" onClick={onEsvaziarCarrinho}>
+          Esvaziar carrinho
+        </Button>
         <Button onClick={onFinalizar}>Finalizar e pagar</Button>
         <Button variant="outline" onClick={onAbrirEmail}>
           Promoções
