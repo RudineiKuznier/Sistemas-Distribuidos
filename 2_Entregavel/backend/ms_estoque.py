@@ -200,8 +200,13 @@ def processar_pedido_criado(ch, id_pedido, itens):
     })
 
 # Processa o evento "pedido.excluido" e devolve os produtos reservados ao estoque
-def processar_pedido_excluido(id_pedido):
+def processar_pedido_excluido(ch, id_pedido):
     devolver_reserva(id_pedido)
+    enviar_evento_estoque(ch, 'estoque.devolvido', {
+        "id_pedido": id_pedido,
+        "status": "ESTOQUE_DEVOLVIDO",
+        "motivo": "PEDIDO_CANCELADO"
+    })
 
 # Devolve ao estoque os produtos reservados para o pedido
 def devolver_reserva(id_pedido):
@@ -247,7 +252,7 @@ def callback(ch, method, properties, body):
         case 'pedido.criado':
             processar_pedido_criado(ch, id_pedido, itens)
         case 'pedido.excluido':
-            processar_pedido_excluido(id_pedido)
+            processar_pedido_excluido(ch, id_pedido)
         case 'pagamento.recusado':
             processar_pagamento_recusado(ch, id_pedido)
 

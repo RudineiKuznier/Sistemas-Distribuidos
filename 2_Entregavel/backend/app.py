@@ -56,6 +56,8 @@ def processar_evento_pedido(routing_key, dados):
         "pedido.estoque_ok": "Estoque Confirmado",
         "pagamento.aprovado": "Pagamento Aprovado",
         "pagamento.recusado": "Pagamento Recusado",
+        "pagamento.pendente": "Aguardando pagamento",
+        "pagamento.checkout_criado": "Aguardando pagamento",
         "pedido.enviado": "Pedido Enviado",
         "estoque.indisponivel": "Estoque Indisponível",
     }
@@ -67,6 +69,9 @@ def processar_evento_pedido(routing_key, dados):
             "routingKey": None,
             "estoqueConfirmado": False,
             "estoqueDevolvido": False,
+            "checkoutUrl": None,
+            "pagamentoPendente": False,
+            "cancelamentoSolicitado": False,
         })
 
         if routing_key == "pedido.estoque_ok":
@@ -74,6 +79,15 @@ def processar_evento_pedido(routing_key, dados):
             pedido["estoqueConfirmado"] = True
         elif routing_key == "estoque.devolvido":
             pedido["estoqueDevolvido"] = True
+            if pedido["cancelamentoSolicitado"]:
+                pedido["status"] = "Pedido Cancelado"
+        elif routing_key == "pagamento.checkout_criado":
+            pedido["checkoutUrl"] = dados.get("checkout_url")
+            pedido["pagamentoPendente"] = True
+            pedido["status"] = mapeamento_status[routing_key]
+        elif routing_key == "pagamento.pendente":
+            pedido["pagamentoPendente"] = True
+            pedido["status"] = mapeamento_status[routing_key]
         else:
             pedido["status"] = mapeamento_status.get(routing_key, "STATUS_DESCONHECIDO")
 
@@ -84,6 +98,9 @@ def processar_evento_pedido(routing_key, dados):
             "routingKey": routing_key,
             "estoqueConfirmado": pedido["estoqueConfirmado"],
             "estoqueDevolvido": pedido["estoqueDevolvido"],
+            "checkoutUrl": pedido["checkoutUrl"],
+            "pagamentoPendente": pedido["pagamentoPendente"],
+            "cancelamentoSolicitado": pedido["cancelamentoSolicitado"],
             "motivo": dados.get("motivo")
         }
 
@@ -133,10 +150,12 @@ def consumidor_rabbitmq_worker():
             routing_keys = (
                 "pagamento.aprovado",
                 "pagamento.recusado",
+                "pagamento.checkout_criado",
                 "pedido.enviado",
                 "pedido.estoque_ok",
                 "estoque.indisponivel",
                 "estoque.devolvido",
+                "pagamento.pendente",
             )
             for rk in routing_keys:
                 channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
@@ -261,6 +280,9 @@ def create_order():
             "routingKey": None,
             "estoqueConfirmado": False,
             "estoqueDevolvido": False,
+            "checkoutUrl": None,
+            "pagamentoPendente": False,
+            "cancelamentoSolicitado": False,
         }
 
     payload = {
@@ -312,6 +334,9 @@ def sse_order_stream(order_id):
             "routingKey": pedido.get("routingKey"),
             "estoqueConfirmado": pedido.get("estoqueConfirmado", False),
             "estoqueDevolvido": pedido.get("estoqueDevolvido", False),
+            "checkoutUrl": pedido.get("checkoutUrl"),
+            "pagamentoPendente": pedido.get("pagamentoPendente", False),
+            "cancelamentoSolicitado": pedido.get("cancelamentoSolicitado", False),
         }
         yield f"data: {json.dumps(estado_inicial)}\n\n"
 
@@ -324,49 +349,30 @@ def sse_order_stream(order_id):
 
     return Response(event_stream(), mimetype="text/event-stream")
 
-@app.route('/api/payments/<order_id>/result', methods=['POST'])
-def handle_payment_result(order_id):
+@app.route('/api/orders/<order_id>/cancel', methods=['POST'])
+def cancelar_pedido(order_id):
     """
-    Registrar resultado do pagamento
+    Cancelar pedido com pagamento pendente
     ---
     tags:
-      - Pagamento
+      - Catálogo e Pedidos
     parameters:
       - name: order_id
         in: path
         type: string
         required: true
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - result
-          properties:
-            result:
-              type: string
-              enum: ["APROVADO", "RECUSADO"]
     responses:
       200:
-        description: Resultado registrado; repetição idêntica é idempotente.
-      400:
-        description: Resultado inválido.
+        description: Cancelamento confirmado pelo MS Pagamento e enviado ao Estoque.
       404:
         description: Pedido não encontrado.
       409:
-        description: Pagamento pendente ou finalizado com resultado oposto.
+        description: Pagamento ainda pendente para o MS Pagamento ou já finalizado.
       502:
         description: MS Pagamento indisponível.
       503:
-        description: Não foi possível publicar o resultado.
+        description: Não foi possível publicar o cancelamento no RabbitMQ.
     """
-    data = request.get_json() or {}
-    resultado = data.get('result')
-
-    if resultado not in ("APROVADO", "RECUSADO"):
-        return jsonify({"error": "Resultado deve ser APROVADO ou RECUSADO."}), 400
-
     with PEDIDOS_LOCK:
         pedido = PEDIDOS.get(order_id)
         if pedido is None:
@@ -374,14 +380,40 @@ def handle_payment_result(order_id):
 
     try:
         response = requests.post(
-            f"http://localhost:5002/api/payments/{order_id}/result",
-            json={"result": resultado},
+            f"http://localhost:5002/api/payments/{order_id}/cancel",
             timeout=5,
         )
-        return jsonify(response.json()), response.status_code
+        resposta = response.json()
+        if not response.ok:
+            return jsonify(resposta), response.status_code
     except requests.RequestException as e:
         print(f"[MS Pagamento Error] {e}")
         return jsonify({"error": "Não foi possível consultar o MS Pagamento."}), 502
+
+    with PEDIDOS_LOCK:
+        pedido = PEDIDOS[order_id]
+        pedido["cancelamentoSolicitado"] = True
+        pedido["status"] = "Cancelamento solicitado"
+        evento_sse = {
+            "orderId": order_id,
+            "status": pedido["status"],
+            "routingKey": "pedido.excluido",
+            "estoqueConfirmado": pedido["estoqueConfirmado"],
+            "estoqueDevolvido": pedido["estoqueDevolvido"],
+            "checkoutUrl": pedido["checkoutUrl"],
+            "pagamentoPendente": pedido["pagamentoPendente"],
+            "cancelamentoSolicitado": True,
+        }
+
+    if not enviar_evento_rabbitmq("pedido.excluido", {
+        "id_pedido": order_id,
+        "status": "PEDIDO_EXCLUIDO",
+    }):
+        notificar_clientes_sse(order_id, evento_sse)
+        return jsonify({"error": "Não foi possível publicar o cancelamento."}), 503
+
+    notificar_clientes_sse(order_id, evento_sse)
+    return jsonify(resposta), 200
 
 @app.route('/api/promotions/subscriptions', methods=['POST'])
 def subscribe_promotions():
