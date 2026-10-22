@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useCallback } from 'react'
 import { CardImage } from '@/components/pages/CardImage'
 import { CartBar } from '@/components/pages/CartBar'
 import { DialogEmail } from '@/components/pages/DialogEmail'
@@ -20,7 +20,7 @@ export function Loja() {
   const [dialogEmail, setDialogEmail] = useState(false)
 
   const carregarProdutos = useCallback(() => {
-    return fetch('/api/products')
+    fetch('/api/products', { cache: 'no-store' })
       .then((res) => {
         if (!res.ok) throw new Error('Não foi possível carregar os produtos')
         return res.json()
@@ -43,13 +43,13 @@ export function Loja() {
   function adicionar(p: Produto) {
     setCarrinho((c) => {
       const atual = c[p.id] ?? 0
-      if (atual >= p.stock) return c 
+      if (atual >= p.stock) return c
       return { ...c, [p.id]: atual + 1 }
     })
   }
 
   async function finalizar() {
-    const aba = window.open('', '_blank') 
+    const aba = window.open('', '_blank')
 
     try {
       const res = await fetch('/api/orders', {
@@ -68,11 +68,13 @@ export function Loja() {
       if (aba) aba.location.href = paymentUrl
       setOrderId(orderId) // SSE
       setCarrinho({})
+      setTimeout(carregarProdutos, 700) // garante um refetch após a reserva
     } catch (e) {
       aba?.close()
       console.error(e instanceof Error ? e.message : 'Erro ao criar o pedido')
     }
   }
+
   return (
     <>
       <PromotionsBar onAbrirPromocoes={() => setDialogEmail(true)} />
@@ -93,6 +95,7 @@ export function Loja() {
               descr={`${p.category} · R$ ${p.price.toFixed(2)}`}
               quantidade={p.stock}
               onAdd={() => adicionar(p)}
+               disabled={p.stock === 0}
             />
           ))}
         </div>

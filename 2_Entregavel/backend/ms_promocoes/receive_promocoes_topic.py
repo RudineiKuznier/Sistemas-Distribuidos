@@ -1,0 +1,69 @@
+import json
+import random
+import sys
+import pika
+from security import verificar_evento
+import os
+
+CAMINHO_CHAVES_PUBLICAS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "chaves_publicas"
+)
+CATEGORIAS = ["A", "B", "C"]
+EXCHANGE = "promocoes"
+INTERVALO_PADRAO = 2
+
+# Cria uma promoção aleatória para a categoria especificada
+def criar_promocao(categoria):
+    produto = random.choice(["camisa", "tenis", "calca", "meia", "bone"])
+    return {
+        "produto": produto,
+        "categoria": categoria,
+        "desconto_percentual": random.randint(10, 50),
+    }
+
+# Publica promoções no exchange "promocoes" com a routing key especificada ou aleatória
+def publicar_promocoes(routing_key=None, intervalo=INTERVALO_PADRAO):
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host="localhost", virtual_host="my_vhost")
+    )
+    channel = connection.channel()
+
+    channel.exchange_declare(exchange='promocoes', exchange_type='topic')
+
+    result = channel.queue_declare(queue='', exclusive=True)
+    queue_name = result.method.queue
+
+    binding_keys = sys.argv[1:]
+    if not binding_keys:
+        sys.stderr.write("Uso: %s [binding_key]...\nExemplo: %s promocao.categoria.A\n" % (sys.argv[0], sys.argv[0]))
+        sys.exit(1)
+
+    for binding_key in binding_keys:
+        channel.queue_bind(
+            exchange='promocoes', queue=queue_name, routing_key=binding_key)
+
+    print('     Aguardando promoções. Para sair pressione CTRL+C')
+
+
+    def callback(ch, method, properties, body):
+        envelope = json.loads(body.decode('utf-8'))
+        if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+            print(f"    Assinatura inválida/adulterada! Evento '{method.routing_key}' descartado.")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            return
+  
+        promocao = envelope.get('payload', {})
+        print(f"    Recebido {method.routing_key}: {promocao}")
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(
+        queue=queue_name, on_message_callback=callback, auto_ack=False)
+
+    channel.start_consuming()
+
+if __name__ == "__main__":
+    chave = sys.argv[1] if len(sys.argv) > 1 else None
+    intervalo = float(sys.argv[2]) if len(sys.argv) > 2 else INTERVALO_PADRAO
+    publicar_promocoes(chave, intervalo)

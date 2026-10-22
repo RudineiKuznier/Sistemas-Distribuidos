@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useRef } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -10,10 +10,20 @@ import {
 } from '@/components/ui/card'
 
 const ROTULOS: Record<string, string> = {
-  ESTOQUE_CONFIRMADO: 'Estoque confirmado',
-  PAGAMENTO_APROVADO: 'Pagamento aprovado',
-  PAGAMENTO_RECUSADO: 'Pagamento recusado',
-  PEDIDO_ENVIADO: 'Pedido enviado',
+  'Estoque Confirmado': 'Estoque confirmado',
+  'Estoque Indisponível': 'Estoque indisponível',
+  'Pagamento Aprovado': 'Pagamento aprovado',
+  'Pagamento Recusado': 'Pagamento recusado',
+  'Pedido Enviado': 'Pedido enviado',
+  CRIADO: 'Pedido criado',
+  AGUARDANDO: 'Aguardando…',
+}
+
+const ERROS = ['Pagamento Recusado', 'Estoque Indisponível']
+
+interface Props {
+  orderId: string
+  onStatusChange?: () => void
 }
 
 interface EventoPedido {
