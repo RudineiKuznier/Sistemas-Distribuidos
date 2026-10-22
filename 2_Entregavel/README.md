@@ -51,7 +51,15 @@ source venv/bin/activate
 python backend/ms_estoque.py
 ```
 
-4. No segundo terminal, inicie o MS Pagamento:
+4. No segundo terminal, inicie o Mock de Pagamento:
+```bash
+source venv/bin/activate
+python backend/mock_pagamento.py
+```
+
+O Mock disponibiliza o checkout em `http://localhost:5003` e envia o resultado ao webhook do MS Pagamento.
+
+5. No terceiro terminal, inicie o MS Pagamento:
 ```bash
 source venv/bin/activate
 python backend/ms_pagamento.py
@@ -59,13 +67,13 @@ python backend/ms_pagamento.py
 
 O MS Pagamento cria `backend/pagamentos.db` e precisa da chave privada `backend/ms_pagamento.pem` para assinar eventos.
 
-5. No terceiro terminal, inicie o Gateway:
+6. No quarto terminal, inicie o Gateway:
 ```bash
 source venv/bin/activate
 python backend/app.py
 ```
 
-6. No quarto terminal, instale as dependências e inicie o frontend:
+7. No quinto terminal, instale as dependências e inicie o frontend:
 ```bash
 cd web-app
 pnpm install
@@ -75,6 +83,8 @@ pnpm dev
 ### Backend
 - O MS Estoque cria `backend/estoque.db` e disponibiliza o catálogo em [http://localhost:5001/api/products](http://localhost:5001/api/products).
 - O Gateway consulta esse endpoint e expõe a API em [http://localhost:5000/api/products](http://localhost:5000/api/products).
+- Após a reserva, o MS Pagamento solicita uma cobrança ao Mock. O frontend abre o checkout em nova aba; o Mock envia o resultado ao webhook do MS Pagamento.
+- O cancelamento fica disponível no acompanhamento enquanto o pagamento estiver pendente. O Gateway publica `pedido.excluido` e o Estoque devolve a reserva.
 - Swagger: [http://127.0.0.1:5000/apidocs](http://127.0.0.1:5000/apidocs)
 
 ### Frontend

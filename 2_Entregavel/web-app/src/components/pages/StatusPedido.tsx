@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
@@ -20,6 +21,8 @@ interface EventoPedido {
   routingKey?: string
   estoqueConfirmado?: boolean
   estoqueDevolvido?: boolean
+  pagamentoPendente?: boolean
+  cancelamentoSolicitado?: boolean
 }
 
 interface Props {
@@ -30,7 +33,11 @@ interface Props {
 export function StatusPedido({ orderId, onInventoryChanged }: Props) {
   const [status, setStatus] = useState<string | null>(null)
   const [estoqueDevolvido, setEstoqueDevolvido] = useState(false)
+  const [pagamentoPendente, setPagamentoPendente] = useState(false)
   const [pagamentoRecusado, setPagamentoRecusado] = useState(false)
+  const [cancelamentoSolicitado, setCancelamentoSolicitado] = useState(false)
+  const [cancelando, setCancelando] = useState(false)
+  const [erroCancelamento, setErroCancelamento] = useState<string | null>(null)
   const estoqueConfirmadoRef = useRef(false)
   const estoqueDevolvidoRef = useRef(false)
 
@@ -55,11 +62,41 @@ export function StatusPedido({ orderId, onInventoryChanged }: Props) {
         setPagamentoRecusado(true)
       }
       if (devolveuEstoque) setEstoqueDevolvido(true)
+      if (evento.pagamentoPendente) setPagamentoPendente(true)
+      if (evento.cancelamentoSolicitado) setCancelamentoSolicitado(true)
       if (precisaAtualizarCatalogo) onInventoryChanged()
     }
 
     return () => source.close() // fecha ao desmontar
   }, [orderId, onInventoryChanged])
+
+  async function cancelarPedido() {
+    if (!window.confirm('Deseja cancelar este pedido?')) return
+
+    setCancelando(true)
+    setErroCancelamento(null)
+    try {
+      const response = await fetch(`/api/orders/${orderId}/cancel`, { method: 'POST' })
+      const resposta = await response.json()
+      if (!response.ok) {
+        throw new Error(resposta.error ?? 'Não foi possível cancelar o pedido.')
+      }
+      setCancelamentoSolicitado(true)
+    } catch (erro) {
+      setErroCancelamento(
+        erro instanceof Error ? erro.message : 'Erro ao cancelar o pedido.'
+      )
+    } finally {
+      setCancelando(false)
+    }
+  }
+
+  const pedidoFinalizado = [
+    'Pagamento Aprovado',
+    'Pagamento Recusado',
+    'Pedido Enviado',
+    'Pedido Cancelado',
+  ].includes(status ?? '')
 
   return (
     <Card>
@@ -68,11 +105,35 @@ export function StatusPedido({ orderId, onInventoryChanged }: Props) {
         <CardDescription>Acompanhamento em tempo real</CardDescription>
       </CardHeader>
       <CardContent>
-        <Badge variant={pagamentoRecusado ? 'destructive' : 'secondary'}>
-          {status ? ROTULOS[status] ?? status : 'Aguardando pagamento…'}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge variant={pagamentoRecusado ? 'destructive' : 'secondary'}>
+            {status ? ROTULOS[status] ?? status : 'Aguardando pagamento…'}
+          </Badge>
+          {pagamentoPendente && !estoqueDevolvido && !pedidoFinalizado && (
+            <Button
+              variant="destructive"
+              disabled={cancelando}
+              onClick={() => void cancelarPedido()}
+            >
+              {cancelando
+                ? 'Cancelando…'
+                : cancelamentoSolicitado
+                  ? 'Reenviar cancelamento'
+                  : 'Cancelar pedido'}
+            </Button>
+          )}
+        </div>
+        {erroCancelamento && (
+          <p className="mt-2 text-sm text-destructive" role="alert">
+            {erroCancelamento}
+          </p>
+        )}
         {estoqueDevolvido && (
-          <p className="mt-2 text-sm">Itens devolvidos ao estoque.</p>
+          <p className="mt-2 text-sm">
+            {cancelamentoSolicitado
+              ? 'Pedido cancelado; itens devolvidos ao estoque.'
+              : 'Itens devolvidos ao estoque.'}
+          </p>
         )}
       </CardContent>
     </Card>
