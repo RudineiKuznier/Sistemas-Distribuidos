@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { CardImage } from '@/components/pages/CardImage'
 import { CartBar } from '@/components/pages/CartBar'
 import { DialogEmail } from '@/components/pages/DialogEmail'
@@ -18,8 +18,8 @@ export function Loja() {
   const [orderId, setOrderId] = useState<string | null>(null)
   const [dialogEmail, setDialogEmail] = useState(false)
 
-  useEffect(() => {
-    fetch('/api/products')
+  const carregarProdutos = useCallback(() => {
+    return fetch('/api/products')
       .then((res) => {
         if (!res.ok) throw new Error('Não foi possível carregar os produtos')
         return res.json()
@@ -27,6 +27,14 @@ export function Loja() {
       .then(setProdutos)
       .catch((e) => console.error(e.message))
   }, [])
+
+  const atualizarCatalogo = useCallback(() => {
+    void carregarProdutos()
+  }, [carregarProdutos])
+
+  useEffect(() => {
+    void carregarProdutos()
+  }, [carregarProdutos])
 
   const categorias = [...new Set(produtos.map((p) => p.category))]
   const itens = Object.values(carrinho).reduce((soma, q) => soma + q, 0)
@@ -67,7 +75,13 @@ export function Loja() {
   return (
     <>
       <main className="mx-auto max-w-7xl p-4 pb-24">
-        {orderId && <StatusPedido orderId={orderId} />}
+        {orderId && (
+          <StatusPedido
+            key={orderId}
+            orderId={orderId}
+            onInventoryChanged={atualizarCatalogo}
+          />
+        )}
          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {produtos.map((p) => (
             <CardImage

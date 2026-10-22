@@ -4,6 +4,7 @@ import uuid
 import queue
 import threading
 import pika
+import requests
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from flasgger import Swagger
@@ -29,14 +30,6 @@ swagger_template = {
 
 swagger = Swagger(app, template=swagger_template)
 
-PRODUTOS = [
-    {"id": "camisa", "name": "Camisa Polo", "price": 89.90, "category": "Vestuário", "stock": 100},
-    {"id": "tenis", "name": "Tênis Esportivo", "price": 299.90, "category": "Calçados", "stock": 2},
-    {"id": "calca", "name": "Calça Jeans", "price": 149.90, "category": "Vestuário", "stock": 0},
-    {"id": "mochila", "name": "Mochila Escolar", "price": 120.00, "category": "Acessórios", "stock": 1},
-    {"id": "casaco", "name": "Casaco de Frio", "price": 250.00, "category": "Vestuário", "stock": 9},
-]
-
 PEDIDOS = {}
 
 sse_subscribers = {}
@@ -56,6 +49,42 @@ def notificar_clientes_sse(id_pedido, dados_evento):
     if id_pedido in sse_subscribers:
         for q in sse_subscribers[id_pedido]:
             q.put(dados_evento)
+
+def processar_evento_pedido(routing_key, dados):
+    id_pedido = dados.get("id_pedido")
+    mapeamento_status = {
+        "pedido.estoque_ok": "Estoque Confirmado",
+        "pagamento.aprovado": "Pagamento Aprovado",
+        "pagamento.recusado": "Pagamento Recusado",
+        "pedido.enviado": "Pedido Enviado",
+        "estoque.indisponivel": "Estoque Indisponível",
+    }
+
+    pedido = PEDIDOS.setdefault(id_pedido, {
+        "status": "Aguardando atualizações",
+        "routingKey": None,
+        "estoqueConfirmado": False,
+        "estoqueDevolvido": False,
+    })
+
+    if routing_key == "pedido.estoque_ok":
+        pedido["status"] = mapeamento_status[routing_key]
+        pedido["estoqueConfirmado"] = True
+    elif routing_key == "estoque.devolvido":
+        pedido["estoqueDevolvido"] = True
+    else:
+        pedido["status"] = mapeamento_status.get(routing_key, "STATUS_DESCONHECIDO")
+
+    pedido["routingKey"] = routing_key
+
+    notificar_clientes_sse(id_pedido, {
+        "orderId": id_pedido,
+        "status": pedido["status"],
+        "routingKey": routing_key,
+        "estoqueConfirmado": pedido["estoqueConfirmado"],
+        "estoqueDevolvido": pedido["estoqueDevolvido"],
+        "motivo": dados.get("motivo")
+    })
 
 
 def criar_conexao_rabbitmq():
@@ -100,6 +129,7 @@ def consumidor_rabbitmq_worker():
                 "pedido.enviado",
                 "pedido.estoque_ok",
                 "estoque.indisponivel",
+                "estoque.devolvido",
             )
             for rk in routing_keys:
                 channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
@@ -113,28 +143,7 @@ def consumidor_rabbitmq_worker():
                         return
 
                     dados = envelope.get("payload", {})
-                    id_pedido = dados.get("id_pedido")
-                    rk = method.routing_key
-
-                    mapeamento_status = {
-                        "pedido.estoque_ok": "Estoque Confirmado",
-                        "pagamento.aprovado": "Pagamento Aprovado",
-                        "pagamento.recusado": "Pagamento Recusado",
-                        "pedido.enviado": "Pedido Enviado",
-                        "estoque.indisponivel": "Estoque Indisponível"
-                    }
-
-                    status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
-
-                    if id_pedido in PEDIDOS:
-                        PEDIDOS[id_pedido]["status"] = status_traduzido
-
-                    notificar_clientes_sse(id_pedido, {
-                        "orderId": id_pedido,
-                        "status": status_traduzido,
-                        "routingKey": rk,
-                        "motivo": dados.get("motivo")
-                    })
+                    processar_evento_pedido(method.routing_key, dados)
 
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except Exception as ex:
@@ -149,7 +158,6 @@ def consumidor_rabbitmq_worker():
             threading.Event().wait(5)
 
 threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensagens Rabbit segundo plano
--
 
 @app.route('/api/products', methods=['GET'])
 def get_products():
@@ -182,7 +190,13 @@ def get_products():
                 type: integer
                 example: 100
     """
-    return jsonify(PRODUTOS), 200
+    try:
+        response = requests.get("http://localhost:5001/api/products", timeout=3)
+        response.raise_for_status()
+        return jsonify(response.json()), 200
+    except requests.RequestException as e:
+        print(f"[MS Estoque Error] {e}")
+        return jsonify({"error": "Não foi possível consultar o estoque"}), 502
 
 
 @app.route('/api/orders', methods=['POST'])
@@ -243,7 +257,10 @@ def create_order():
     PEDIDOS[order_id] = {
         "id_pedido": order_id,
         "produtos": produtos_formatados,
-        "status": "CRIADO"
+        "status": "Pedido criado",
+        "routingKey": None,
+        "estoqueConfirmado": False,
+        "estoqueDevolvido": False,
     }
 
     payload = {
@@ -287,8 +304,15 @@ def sse_order_stream(order_id):
             sse_subscribers[order_id] = []
         sse_subscribers[order_id].append(q)
 
-        status_atual = PEDIDOS.get(order_id, {}).get("status", "AGUARDANDO")
-        yield f"data: {json.dumps({'orderId': order_id, 'status': status_atual})}\n\n"
+        pedido = PEDIDOS.get(order_id, {})
+        estado_inicial = {
+            "orderId": order_id,
+            "status": pedido.get("status", "AGUARDANDO"),
+            "routingKey": pedido.get("routingKey"),
+            "estoqueConfirmado": pedido.get("estoqueConfirmado", False),
+            "estoqueDevolvido": pedido.get("estoqueDevolvido", False),
+        }
+        yield f"data: {json.dumps(estado_inicial)}\n\n"
 
         try:
             while True:
@@ -400,4 +424,4 @@ def subscribe_promotions():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
