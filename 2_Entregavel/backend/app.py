@@ -1,42 +1,23 @@
 import os
-import csv
 import json
 import uuid
 import queue
 import threading
 import pika
+import requests
 from flask import Flask, jsonify, request, Response
-from flask_cors import CORS
 from flasgger import Swagger
 import resend
 from dotenv import load_dotenv
 from security import verificar_evento, assinar_evento
 
 load_dotenv()
+
 resend.api_key = os.getenv("RESEND_API_KEY")
 
+ESTOQUE_URL = os.getenv("ESTOQUE_URL", "http://localhost:5001")
+
 app = Flask(__name__)
-CORS(app) 
-
-def carregar_produtos():
-    caminho_csv = os.path.join(os.path.dirname(__file__), "database.csv")
-    produtos = []
-
-    if not os.path.exists(caminho_csv):
-        print(f"[ERRO] Ficheiro {caminho_csv} não encontrado.")
-        return produtos
-
-    with open(caminho_csv, mode='r', encoding='utf-8-sig') as arquivo:
-        leitor = csv.DictReader(arquivo)
-        for linha in leitor:
-            produtos.append({
-                "id": linha["id"],
-                "name": linha["name"],
-                "price": float(linha["price"]),     
-                "category": linha["category"],
-                "stock": int(linha["stock"])     
-            })
-    return produtos
 
 swagger_template = {
     "swagger": "2.0",
@@ -49,27 +30,24 @@ swagger_template = {
 
 swagger = Swagger(app, template=swagger_template)
 
-
 PEDIDOS = {}
 
 sse_subscribers = {}
 
-NOME_PRODUTOR = "ms_principal"
 CAMINHO_CHAVE_PRIVADA = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    f"{NOME_PRODUTOR}.pem"
+    "ms_principal.pem"
 )
+
 CAMINHO_CHAVES_PUBLICAS = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "chaves_publicas"
 )
 
 def notificar_clientes_sse(id_pedido, dados_evento):
-    """Envia atualizações via SSE para as conexões ativas do frontend."""
     if id_pedido in sse_subscribers:
         for q in sse_subscribers[id_pedido]:
             q.put(dados_evento)
-
 
 def criar_conexao_rabbitmq():
     return pika.BlockingConnection(
@@ -82,7 +60,7 @@ def enviar_evento_rabbitmq(routing_key, dados_evento):
         channel = connection.channel()
         channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
 
-        envelope = assinar_evento(dados_evento, NOME_PRODUTOR, CAMINHO_CHAVE_PRIVADA)
+        envelope = assinar_evento(dados_evento, "ms_principal", CAMINHO_CHAVE_PRIVADA)
 
         channel.basic_publish(
             exchange="eCommerce",
@@ -98,103 +76,72 @@ def enviar_evento_rabbitmq(routing_key, dados_evento):
         print(f"[RabbitMQ Producer Error] {e}")
 
 def consumidor_rabbitmq_worker():
-    """Worker em background que consome respostas dos microsserviços de Estoque e Pagamento."""
-    while True:
-        try:
-            connection = criar_conexao_rabbitmq()
-            channel = connection.channel()
-            channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
-            channel.queue_declare(queue="ms_fila_principal", durable=True)
-
-            routing_keys = (
-                "pagamento.aprovado",
-                "pagamento.recusado",
-                "pedido.enviado",
-                "pedido.estoque_ok",
-                "estoque.indisponivel",
-            )
-            for rk in routing_keys:
-                channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
-
-            def callback(ch, method, properties, body):
-                try:
-                    envelope = json.loads(body.decode("utf-8"))
-                    if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
-                        print(f"Assinatura inválida! Evento '{method.routing_key}' descartado.")
-                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-                        return
-
-                    dados = envelope.get("payload", {})
-                    id_pedido = dados.get("id_pedido")
-                    rk = method.routing_key
-
-                    mapeamento_status = {
-                        "pedido.estoque_ok": "Estoque Confirmado",
-                        "pagamento.aprovado": "Pagamento Aprovado",
-                        "pagamento.recusado": "Pagamento Recusado",
-                        "pedido.enviado": "Pedido Enviado",
-                        "estoque.indisponivel": "Estoque Indisponível"
-                    }
-
-                    status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
-
-                    if id_pedido in PEDIDOS:
-                        PEDIDOS[id_pedido]["status"] = status_traduzido
-
-                    notificar_clientes_sse(id_pedido, {
-                        "orderId": id_pedido,
-                        "status": status_traduzido,
-                        "routingKey": rk,
-                        "motivo": dados.get("motivo")
-                    })
-
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-                except Exception as ex:
-                    print(f"[Error callback] {ex}")
-                    ch.basic_ack(delivery_tag=method.delivery_tag)
-
-            channel.basic_qos(prefetch_count=1)
-            channel.basic_consume(queue="ms_fila_principal", on_message_callback=callback, auto_ack=False)
-            channel.start_consuming()
-        except Exception as e:
-            print(f"[RabbitMQ Consumer Offline] Reconectando em 5s... Erro: {e}")
-            threading.Event().wait(5)
+  while True:
+      try:
+          connection = criar_conexao_rabbitmq()
+          channel = connection.channel()
+          channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
+          channel.queue_declare(queue="ms_fila_principal", durable=True)
+          routing_keys = (
+              "pagamento.aprovado",
+              "pagamento.recusado",
+              "pedido.enviado",
+              "pedido.estoque_ok",
+              "estoque.indisponivel",
+          )
+          for rk in routing_keys:
+              channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
+          def callback(ch, method, properties, body):
+              try:
+                  envelope = json.loads(body.decode("utf-8"))
+                  if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+                      print(f"Assinatura inválida! Evento '{method.routing_key}' descartado.")
+                      ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                      return
+                  dados = envelope.get("payload", {})
+                  id_pedido = dados.get("id_pedido")
+                  rk = method.routing_key
+                  mapeamento_status = {
+                      "pedido.estoque_ok": "Estoque Confirmado",
+                      "pagamento.aprovado": "Pagamento Aprovado",
+                      "pagamento.recusado": "Pagamento Recusado",
+                      "pedido.enviado": "Pedido Enviado",
+                      "estoque.indisponivel": "Estoque Indisponível"
+                  }
+                  status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
+                  if id_pedido in PEDIDOS:
+                      PEDIDOS[id_pedido]["status"] = status_traduzido
+                  notificar_clientes_sse(id_pedido, {
+                      "orderId": id_pedido,
+                      "status": status_traduzido,
+                      "routingKey": rk,
+                      "motivo": dados.get("motivo")
+                  })
+                  ch.basic_ack(delivery_tag=method.delivery_tag)
+              except Exception as ex:
+                  print(f"[Error callback] {ex}")
+                  ch.basic_ack(delivery_tag=method.delivery_tag)
+          channel.basic_qos(prefetch_count=1)
+          channel.basic_consume(queue="ms_fila_principal", on_message_callback=callback, auto_ack=False)
+          channel.start_consuming()
+      except Exception as e:
+          print(f"[RabbitMQ Consumer Offline] Reconectando em 5s... Erro: {e}")
+          threading.Event().wait(5)
 
 threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensagens Rabbit segundo plano
 
 @app.route('/api/products', methods=['GET'])
 def get_products():
     """
-    Obter catálogo de produtos
+    Listar produtos em estoque (consulta o MS Estoque via REST)
     ---
     tags:
       - Catálogo e Pedidos
     responses:
       200:
-        description: Retorna a lista de produtos do catálogo
-        schema:
-          type: array
-          items:
-            type: object
-            properties:
-              id:
-                type: string
-                example: "camisa"
-              name:
-                type: string
-                example: "Camisa Polo"
-              price:
-                type: number
-                example: 89.90
-              category:
-                type: string
-                example: "Vestuário"
-              stock:
-                type: integer
-                example: 100
+        description: Lista de produtos disponíveis
     """
-    #return jsonify([p for p in carregar_produtos() if p["stock"] > 0]), 200
-    return jsonify(carregar_produtos()), 200
+    return requests.get(f"{ESTOQUE_URL}/products", timeout=3).json()
 
 
 @app.route('/api/orders', methods=['POST'])

@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { CardImage } from '@/components/pages/CardImage'
 import { CartBar } from '@/components/pages/CartBar'
-import { DialogEmail } from '@/components/pages/DialogEmail'
 import { StatusPedido } from '@/components/pages/StatusPedido'
 
 interface Produto {
@@ -16,7 +15,6 @@ export function Loja() {
   const [produtos, setProdutos] = useState<Produto[]>([])
   const [carrinho, setCarrinho] = useState<Record<string, number>>({})
   const [orderId, setOrderId] = useState<string | null>(null)
-  const [dialogEmail, setDialogEmail] = useState(false)
 
   const carregarProdutos = useCallback(() => {
     fetch('/api/products', { cache: 'no-store' })
@@ -73,9 +71,11 @@ export function Loja() {
   return (
     <>
       <main className="mx-auto max-w-7xl space-y-8 p-4 pb-24">
-        {orderId && (
-          <StatusPedido orderId={orderId} onStatusChange={carregarProdutos} />
-        )}
+        <StatusPedido
+          orderId={orderId}
+          categorias={categorias}
+          onStatusChange={carregarProdutos}
+        />        
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {produtos.map((p) => (
             <CardImage
@@ -90,17 +90,7 @@ export function Loja() {
         </div>
       </main>
 
-      <CartBar
-        itens={itens}
-        onFinalizar={finalizar}
-        onAbrirEmail={() => setDialogEmail(true)}
-      />
-
-      <DialogEmail
-        open={dialogEmail}
-        onOpenChange={setDialogEmail}
-        categorias={categorias}
-      />
+     <CartBar itens={itens} onFinalizar={finalizar} />
     </>
   )
 }
