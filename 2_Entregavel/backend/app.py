@@ -7,13 +7,10 @@ import pika
 import requests
 from flask import Flask, jsonify, request, Response
 from flasgger import Swagger
-import resend
 from dotenv import load_dotenv
 from security import verificar_evento, assinar_evento
 
 load_dotenv()
-
-resend.api_key = os.getenv("RESEND_API_KEY")
 
 ESTOQUE_URL = os.getenv("ESTOQUE_URL", "http://localhost:5001")
 
@@ -83,11 +80,12 @@ def consumidor_rabbitmq_worker():
           channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
           channel.queue_declare(queue="ms_fila_principal", durable=True)
           routing_keys = (
-              "pagamento.aprovado",
-              "pagamento.recusado",
-              "pedido.enviado",
-              "pedido.estoque_ok",
-              "estoque.indisponivel",
+            "pagamento.criado",
+            "pagamento.aprovado",
+            "pagamento.recusado",
+            "pedido.enviado",
+            "pedido.estoque_ok",
+            "estoque.indisponivel",
           )
           for rk in routing_keys:
               channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
@@ -103,20 +101,27 @@ def consumidor_rabbitmq_worker():
                   rk = method.routing_key
                   mapeamento_status = {
                       "pedido.estoque_ok": "Estoque Confirmado",
+                      "pagamento.criado": "Aguardando Pagamento",
                       "pagamento.aprovado": "Pagamento Aprovado",
                       "pagamento.recusado": "Pagamento Recusado",
                       "pedido.enviado": "Pedido Enviado",
                       "estoque.indisponivel": "Estoque Indisponível"
                   }
                   status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
+
                   if id_pedido in PEDIDOS:
                       PEDIDOS[id_pedido]["status"] = status_traduzido
+                      if dados.get("checkoutUrl"):
+                          PEDIDOS[id_pedido]["checkoutUrl"] = dados["checkoutUrl"]
+
                   notificar_clientes_sse(id_pedido, {
                       "orderId": id_pedido,
                       "status": status_traduzido,
                       "routingKey": rk,
-                      "motivo": dados.get("motivo")
+                      "motivo": dados.get("motivo"),
+                      "checkoutUrl": dados.get("checkoutUrl")
                   })
+
                   ch.basic_ack(delivery_tag=method.delivery_tag)
               except Exception as ex:
                   print(f"[Error callback] {ex}")
@@ -212,12 +217,8 @@ def create_order():
     }
     enviar_evento_rabbitmq("pedido.criado", payload)
 
-    frontend_origin = request.headers.get("Origin", "http://localhost:5173")
-    payment_url = f"{frontend_origin}/pagamento?orderId={order_id}"
-
     return jsonify({
-        "orderId": order_id,
-        "paymentUrl": payment_url
+        "orderId": order_id
     }), 201
 
 @app.route('/api/orders/<order_id>', methods=['DELETE'])
@@ -260,8 +261,8 @@ def sse_order_stream(order_id):
             sse_subscribers[order_id] = []
         sse_subscribers[order_id].append(q)
 
-        status_atual = PEDIDOS.get(order_id, {}).get("status", "AGUARDANDO")
-        yield f"data: {json.dumps({'orderId': order_id, 'status': status_atual})}\n\n"
+        pedido = PEDIDOS.get(order_id, {})
+        yield f"data: {json.dumps({'orderId': order_id, 'status': pedido.get('status', 'AGUARDANDO'), 'checkoutUrl': pedido.get('checkoutUrl')})}\n\n"
 
         try:
             while True:
@@ -272,53 +273,10 @@ def sse_order_stream(order_id):
 
     return Response(event_stream(), mimetype="text/event-stream")
 
-
-@app.route('/api/payments/<order_id>/result', methods=['POST'])
-def handle_payment_result(order_id):
-    """
-    Processar resultado vindo do Mock de Pagamento do Frontend
-    ---
-    tags:
-      - Pagamento
-    parameters:
-      - name: order_id
-        in: path
-        type: string
-        required: true
-        description: ID do pedido
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - result
-          properties:
-            result:
-              type: string
-              enum: ["APROVADO", "RECUSADO"]
-              example: "APROVADO"
-    responses:
-      200:
-        description: Resultado publicado no RabbitMQ com sucesso
-    """
-    data = request.get_json() or {}
-    resultado = data.get('result')
-
-    payload = {
-        "id_pedido": order_id,
-        "resultado": resultado
-    }
-
-    enviar_evento_rabbitmq("pagamento.resultado", payload)
-
-    return jsonify({"success": True}), 200
-
-
 @app.route('/api/promotions/subscriptions', methods=['POST'])
 def subscribe_promotions():
     """
-    Inscrição de promoções via e-mail (Resend)
+    Registrar interesse em promoções (publica 'interesse.promocao')
     ---
     tags:
       - Inscrição de Promoções
@@ -341,11 +299,9 @@ def subscribe_promotions():
               example: ["Vestuário", "Acessórios"]
     responses:
       200:
-        description: Inscrição confirmada e e-mail enviado via Resend
+        description: Interesse registrado
       400:
         description: E-mail não informado
-      500:
-        description: Erro ao disparar o e-mail via Resend
     """
     data = request.get_json() or {}
     email = data.get('email')
@@ -354,19 +310,43 @@ def subscribe_promotions():
     if not email:
         return jsonify({"error": "E-mail é obrigatório"}), 400
 
-    try:
-        if os.getenv("RESEND_API_KEY"):
-            resend.Emails.send({
-                "from": "onboarding@resend.dev",
-                "to": email,
-                "subject": "Inscrição de Promoções Confirmada!",
-                "html": f"<p>Você se inscreveu para receber ofertas nas categorias: <strong>{', '.join(categories) if categories else 'Geral'}</strong></p>"
-            })
-        return jsonify({"message": "Inscrição realizada com sucesso!"}), 200
-    except Exception as e:
-        print(f"[Resend Error] {e}")
-        return jsonify({"error": "Falha ao enviar e-mail"}), 500
+    enviar_evento_rabbitmq("interesse.promocao", {
+        "email": email,
+        "categorias": categories
+    })
+    return jsonify({"message": "Interesse registrado!"}), 200
 
+
+@app.route('/api/promotions/subscriptions', methods=['DELETE'])
+def unsubscribe_promotions():
+    """
+    Cancelar interesse em promoções
+    ---
+    tags:
+      - Inscrição de Promoções
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - email
+          properties:
+            email:
+              type: string
+    responses:
+      200:
+        description: Interesse cancelado
+      400:
+        description: E-mail não informado
+    """
+    email = (request.get_json() or {}).get('email')
+    if not email:
+        return jsonify({"error": "E-mail é obrigatório"}), 400
+
+    enviar_evento_rabbitmq("interesse.promocao.cancelado", {"email": email})
+    return jsonify({"message": "Interesse cancelado"}), 200
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

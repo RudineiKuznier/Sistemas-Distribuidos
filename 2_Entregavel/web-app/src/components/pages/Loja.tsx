@@ -42,7 +42,6 @@ export function Loja() {
   }
 
   async function finalizar() {
-    const aba = window.open('', '_blank')
 
     try {
       const res = await fetch('/api/orders', {
@@ -57,8 +56,7 @@ export function Loja() {
       })
       if (!res.ok) throw new Error('Erro ao criar o pedido')
 
-      const { orderId, paymentUrl } = await res.json()
-      if (aba) aba.location.href = paymentUrl
+      const { orderId } = await res.json()
       setOrderId(orderId) // SSE
       setCarrinho({})
       setTimeout(carregarProdutos, 700) // garante um refetch após a reserva

@@ -84,8 +84,8 @@ export function DialogEmail({ open, onOpenChange, categorias }: Props) {
           </FieldGroup>
 
           <DialogFooter>
-            <DialogClose render={<Button type="button" variant="outline">Cancelar</Button>} />
-            <Button type="submit">Inscrever</Button>
+            <Button variant="outline" type="submit">Inscrever</Button>
+            <Button variant="default" type="submit">Cancelar Inscrição</Button>
           </DialogFooter>
         </form>
       </DialogContent>

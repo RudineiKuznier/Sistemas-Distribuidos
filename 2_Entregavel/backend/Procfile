@@ -3,3 +3,4 @@ pagamento: python3 -u ms_pagamento/ms_pagamento.py
 estoque: python3 -u ms_estoque/ms_estoque.py
 entrega: python3 -u ms_entrega/ms_entrega.py
 estoque_api: python3 -u ms_estoque/consulta_estoque.py
+mock_pagamento: python3 -u mock_pagamento/mock_pagamento.py

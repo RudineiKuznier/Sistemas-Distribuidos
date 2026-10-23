@@ -1,33 +1,26 @@
 import pika
 import json
-from security import verificar_evento, assinar_evento
 import os
+import threading
+import requests
+from flask import Flask, request
+from security import verificar_evento, assinar_evento
 
 NOME_PRODUTOR = "ms_pagamento"
+BASE = os.path.dirname(os.path.abspath(__file__))
+CAMINHO_CHAVE_PRIVADA = os.path.join(BASE, f"{NOME_PRODUTOR}.pem")
+CAMINHO_CHAVES_PUBLICAS = os.path.join(BASE, "chaves_publicas")
 
-CAMINHO_CHAVE_PRIVADA = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    f"{NOME_PRODUTOR}.pem"
-)
-
-CAMINHO_CHAVES_PUBLICAS = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "chaves_publicas"
-)
+MOCK_URL = os.getenv("MOCK_URL", "http://localhost:5003")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5002/webhook")
 
 
-def enviar_evento_pagamento(channel, routing_key, dados_evento):
-    envelope_assinado = assinar_evento(
-        dados_evento,
-        NOME_PRODUTOR,
-        CAMINHO_CHAVE_PRIVADA
-    )
-
-    message = json.dumps(envelope_assinado)
+def publicar(channel, routing_key, dados_evento):
+    envelope = assinar_evento(dados_evento, NOME_PRODUTOR, CAMINHO_CHAVE_PRIVADA)
     channel.basic_publish(
         exchange='eCommerce',
         routing_key=routing_key,
-        body=message,
+        body=json.dumps(envelope),
         properties=pika.BasicProperties(
             content_type='application/json',
             delivery_mode=pika.DeliveryMode.Persistent
@@ -35,41 +28,44 @@ def enviar_evento_pagamento(channel, routing_key, dados_evento):
     )
     print(f"    Enviado para eCommerce: {routing_key}")
 
-def processar_pagamento(channel, id_pedido, status):
-    if (status):
-        message = {
-            "id_pedido": id_pedido,
-            "status": "PAGAMENTO_APROVADO"
-        }
-        enviar_evento_pagamento(channel, 'pagamento.aprovado', message)
+api = Flask(__name__)
+
+
+@api.post('/webhook')
+def webhook():
+    d = request.get_json() or {}
+    id_pedido, status = d.get("orderId"), d.get("status")
+    if not id_pedido or status not in ("APROVADO", "RECUSADO"):
+        return {"error": "payload inválido"}, 400
+
+    if status == "APROVADO":
+        rk = 'pagamento.aprovado'
+        payload = {"id_pedido": id_pedido, "status": "PAGAMENTO_APROVADO"}
     else:
-        message = {
-            "id_pedido": id_pedido, 
-            "status": "PAGAMENTO_RECUSADO", 
-            "motivo": "Saldo insuficiente"
-        }
-        enviar_evento_pagamento(channel, 'pagamento.recusado', message)    
-    
-def iniciar_ms_pagamento():
-    connection = pika.BlockingConnection(
+        rk = 'pagamento.recusado'
+        payload = {"id_pedido": id_pedido, "status": "PAGAMENTO_RECUSADO",
+                   "motivo": "Pagamento recusado"}
+
+    # conexão própria: esta thread não pode usar a do consumidor
+    conn = pika.BlockingConnection(
         pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
-    channel = connection.channel()
+    try:
+        ch = conn.channel()
+        ch.exchange_declare(exchange='eCommerce', exchange_type='direct')
+        publicar(ch, rk, payload)
+    finally:
+        conn.close()
+    return {"ok": True}, 200
 
-    channel.exchange_declare(exchange='eCommerce', exchange_type='direct')
+def criar_cobranca(id_pedido):
+    r = requests.post(f"{MOCK_URL}/charges", json={
+        "orderId": id_pedido,
+        "webhookUrl": WEBHOOK_URL
+    }, timeout=3)
+    r.raise_for_status()
+    return r.json()["checkoutUrl"]
 
-    queue_name = 'ms_fila_pagamento'
-    channel.queue_declare(queue=queue_name, durable=True)
 
-    for rk in ('pedido.estoque_ok', 'pagamento.resultado'):
-        channel.queue_bind(exchange='eCommerce', queue=queue_name, routing_key=rk)
-
-    print('     Aguardando eventos de pagamento. Para sair pressione CTRL+C')
-
-    channel.basic_qos(prefetch_count=1)
-    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
-    channel.start_consuming()
-
-        
 def callback(ch, method, properties, body):
     try:
         envelope = json.loads(body.decode('utf-8'))
@@ -81,18 +77,17 @@ def callback(ch, method, properties, body):
 
         dados = envelope.get('payload', {})
         id_pedido = dados.get('id_pedido')
-        rk = method.routing_key
-
         print("-" * 40)
-        print(f"Routing Key: {rk}")
+        print(f"Routing Key: {method.routing_key}")
         print(f"ID do Pedido: {id_pedido}")
 
-        if rk == 'pedido.estoque_ok':
-            print("    Aguardando resultado do pagamento...")
-
-        elif rk == 'pagamento.resultado':
-            aprovado = (dados.get('resultado') == "APROVADO")
-            processar_pagamento(ch, id_pedido, aprovado)
+        if method.routing_key == 'pedido.estoque_ok':
+            checkout_url = criar_cobranca(id_pedido)
+            publicar(ch, 'pagamento.criado', {
+                "id_pedido": id_pedido,
+                "status": "AGUARDANDO_PAGAMENTO",
+                "checkoutUrl": checkout_url
+            })
 
         print("-" * 40)
         ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -100,6 +95,27 @@ def callback(ch, method, properties, body):
     except Exception as e:
         print(f"    [Erro callback pagamento] {e}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
-        
+
+
+def iniciar_ms_pagamento():
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
+    channel = connection.channel()
+    channel.exchange_declare(exchange='eCommerce', exchange_type='direct')
+
+    queue_name = 'ms_fila_pagamento'
+    channel.queue_declare(queue=queue_name, durable=True)
+    channel.queue_bind(exchange='eCommerce', queue=queue_name, routing_key='pedido.estoque_ok')
+
+    print('     Aguardando eventos de pagamento. Para sair pressione CTRL+C')
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+    channel.start_consuming()
+
+
 if __name__ == '__main__':
+    threading.Thread(
+        target=lambda: api.run(host='0.0.0.0', port=5002, use_reloader=False),
+        daemon=True
+    ).start()
     iniciar_ms_pagamento()
