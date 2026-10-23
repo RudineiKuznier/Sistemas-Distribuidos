@@ -1,63 +1,95 @@
+import os
 import json
 import random
-import sys
+import threading
 import time
 import pika
-import os
-from security import assinar_evento
+import resend
+from dotenv import load_dotenv
+from security import verificar_evento
 
-CATEGORIAS = ["A", "B", "C"]
-EXCHANGE = "promocoes"
-INTERVALO_PADRAO = 2
+load_dotenv()
+resend.api_key = os.getenv("RESEND_API_KEY")
 
-NOME_PRODUTOR = "ms_promocoes"
+BASE = os.path.dirname(os.path.abspath(__file__))
+CAMINHO_CHAVES_PUBLICAS = os.path.join(BASE, "chaves_publicas")
 
-CAMINHO_CHAVE_PRIVADA = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    f"{NOME_PRODUTOR}.pem"
-)
+INTERVALO_SEGUNDOS = 60
+INTERESSES = {}         
+LOCK = threading.Lock()
 
-# Cria uma promoção aleatória para a categoria especificada
-def criar_promocao(categoria):
-    produto = random.choice(["camisa", "tenis", "calca", "meia", "bone"])
-    return {
-        "produto": produto,
-        "categoria": categoria,
-        "desconto_percentual": random.randint(10, 50),
-    }
 
-# Publica promoções no exchange "promocoes" com a routing key especificada ou aleatória
-def publicar_promocoes(routing_key=None, intervalo=INTERVALO_PADRAO):
+def enviar_email(email, categoria, desconto):
+    try:
+        resend.Emails.send({
+            "from": "onboarding@resend.dev",
+            "to": email,
+            "subject": f"Promoção: {desconto}% em {categoria}!",
+            "html": f"<p>Aproveite <strong>{desconto}% de desconto</strong> em {categoria}.</p>"
+        })
+        print(f"    E-mail enviado para {email} ({categoria}, {desconto}%)")
+    except Exception as e:
+        print(f"    [Resend Error] {email}: {e}")
+
+
+def gerador_promocoes():
+    while True:
+        time.sleep(INTERVALO_SEGUNDOS)
+        with LOCK:
+            categorias = {c for cats in INTERESSES.values() for c in cats}
+            if not categorias:
+                continue
+            categoria = random.choice(sorted(categorias))
+            destinatarios = [e for e, cats in INTERESSES.items() if categoria in cats]
+
+        print(f"[Promoção] 10% em {categoria} -> {len(destinatarios)} cliente(s)")
+        for email in destinatarios:
+            enviar_email(email, categoria, 10)
+
+
+def callback(ch, method, properties, body):
+    try:
+        envelope = json.loads(body.decode('utf-8'))
+
+        if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+            print(f"    Assinatura inválida! Evento '{method.routing_key}' descartado.")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            return
+
+        dados = envelope.get('payload', {})
+        email = dados.get('email')
+        print("-" * 40)
+        print(f"Routing Key: {method.routing_key}")
+        print(f"E-mail: {email}")
+
+        with LOCK:
+            if method.routing_key == 'interesse.promocao':
+                INTERESSES[email] = dados.get('categorias', [])
+            elif method.routing_key == 'interesse.promocao.cancelado':
+                INTERESSES.pop(email, None)
+        print("-" * 40)
+    except Exception as e:
+        print(f"    [Erro callback promoções] {e}")
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+
+def iniciar_ms_promocoes():
     connection = pika.BlockingConnection(
-        pika.ConnectionParameters(host="localhost", virtual_host="my_vhost")
-    )
+        pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
     channel = connection.channel()
-    channel.exchange_declare(
-        exchange=EXCHANGE,
-        exchange_type="topic")
+    channel.exchange_declare(exchange='eCommerce', exchange_type='direct')
 
-    print("     Publicando promoções. Para sair pressione CTRL+C")
+    queue_name = 'ms_fila_promocoes'
+    channel.queue_declare(queue=queue_name, durable=True)
+    for rk in ('interesse.promocao', 'interesse.promocao.cancelado'):
+        channel.queue_bind(exchange='eCommerce', queue=queue_name, routing_key=rk)
 
-    chave = routing_key or f"promocao.categoria.{random.choice(CATEGORIAS)}"
-    promocao = criar_promocao('A')
-    envelope_assinado = assinar_evento(
-        promocao,
-        NOME_PRODUTOR,
-        CAMINHO_CHAVE_PRIVADA
-    )
-    channel.basic_publish(
-        exchange=EXCHANGE,
-        routing_key=chave,
-        body=json.dumps(envelope_assinado),
-        properties=pika.BasicProperties(
-            content_type="application/json",
-            delivery_mode=pika.DeliveryMode.Persistent,
-        ),
-    )
-    print(f"    Enviado {chave}: {promocao}")
+    print('     Aguardando eventos de promoções. Para sair pressione CTRL+C')
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+    channel.start_consuming()
 
 
-if __name__ == "__main__":
-    chave = sys.argv[1] if len(sys.argv) > 1 else None
-    intervalo = float(sys.argv[2]) if len(sys.argv) > 2 else INTERVALO_PADRAO
-    publicar_promocoes(chave, intervalo)
+if __name__ == '__main__':
+    threading.Thread(target=gerador_promocoes, daemon=True).start()
+    iniciar_ms_promocoes()
