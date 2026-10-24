@@ -5,18 +5,21 @@ import threading
 import requests
 from flask import Flask, request
 from security import verificar_evento, assinar_evento
+from dotenv import load_dotenv
 
-NOME_PRODUTOR = "ms_pagamento"
+load_dotenv()
+
 BASE = os.path.dirname(os.path.abspath(__file__))
-CAMINHO_CHAVE_PRIVADA = os.path.join(BASE, f"{NOME_PRODUTOR}.pem")
+CAMINHO_CHAVE_PRIVADA = os.path.join(BASE, "ms_pagamento.pem")
 CAMINHO_CHAVES_PUBLICAS = os.path.join(BASE, "chaves_publicas")
 
 MOCK_URL = os.getenv("MOCK_URL", "http://localhost:5003")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5002/webhook")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 
 def publicar(channel, routing_key, dados_evento):
-    envelope = assinar_evento(dados_evento, NOME_PRODUTOR, CAMINHO_CHAVE_PRIVADA)
+    envelope = assinar_evento(dados_evento, "ms_pagamento", CAMINHO_CHAVE_PRIVADA)
     channel.basic_publish(
         exchange='eCommerce',
         routing_key=routing_key,
@@ -26,13 +29,18 @@ def publicar(channel, routing_key, dados_evento):
             delivery_mode=pika.DeliveryMode.Persistent
         )
     )
-    print(f"    Enviado para eCommerce: {routing_key}")
+    print(f"    Enviado ({routing_key}): {dados_evento.get('id_pedido')}")
 
 api = Flask(__name__)
 
 
 @api.post('/webhook')
 def webhook():
+    #validacao seguranca
+    token = request.headers.get("X-Webhook-Token")
+    if token != WEBHOOK_SECRET:
+        return {"error": "Acesso não autorizado"}, 401
+    
     d = request.get_json() or {}
     id_pedido, status = d.get("orderId"), d.get("status")
     if not id_pedido or status not in ("APROVADO", "RECUSADO"):
@@ -46,15 +54,14 @@ def webhook():
         payload = {"id_pedido": id_pedido, "status": "PAGAMENTO_RECUSADO",
                    "motivo": "Pagamento recusado"}
 
-    # conexão própria: esta thread não pode usar a do consumidor
     conn = pika.BlockingConnection(
         pika.ConnectionParameters(host='localhost', virtual_host='my_vhost'))
-    try:
-        ch = conn.channel()
-        ch.exchange_declare(exchange='eCommerce', exchange_type='direct')
-        publicar(ch, rk, payload)
-    finally:
-        conn.close()
+    
+    ch = conn.channel()
+    ch.exchange_declare(exchange='eCommerce', exchange_type='direct')
+    publicar(ch, rk, payload)
+    
+    conn.close()
     return {"ok": True}, 200
 
 def criar_cobranca(id_pedido):

@@ -1,8 +1,14 @@
+
+import os
 import requests
 from flask import Flask, request
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 COBRANCAS = {}  
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 PAGINA = """
 <h2>Pagamento simulado - Pedido {oid}</h2>
@@ -33,9 +39,32 @@ def checkout(oid):
 
 @app.post('/checkout/<oid>/result')
 def resultado(oid):
-    status = request.get_json()["status"]
-    requests.post(COBRANCAS[oid], json={"orderId": oid, "status": status}, timeout=3)
-    return {"ok": True}
+    webhook_url = COBRANCAS.get(oid)
+    if not webhook_url:
+        return {"error": "cobrança não encontrada"}, 404
+
+    status = (request.get_json() or {}).get("status")
+    if status not in ("APROVADO", "RECUSADO"):
+        return {"error": "status inválido"}, 400
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Token": WEBHOOK_SECRET,
+    }
+
+    try:
+        resposta = requests.post(
+            webhook_url,
+            json={"orderId": oid, "status": status},
+            headers=headers,
+            timeout=3,
+        )
+        resposta.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[Webhook erro] {e}")
+        return {"error": "falha ao chamar o webhook"}, 502
+
+    return {"ok": True}, 200
 
 if __name__ == '__main__':
     app.run(port=5003)

@@ -1,6 +1,6 @@
 id,name,price,category,stock
-1,Camiseta,89,Vestuário,4
-2,Calça,149.90,Vestuário,7
+1,Camiseta,89,Vestuário,0
+2,Calça,149.90,Vestuário,4
 3,Tênis,299,Calçados,9
 4,Mochila,120,Acessórios,10
 5,Casaco,250,Vestuário,9
