@@ -8,6 +8,7 @@ CAMINHO_CSV = os.path.abspath(os.getenv(
     "DATABASE_CSV",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "database.csv")
 ))
+
 def carregar_estoque():
     with open(CAMINHO_CSV, encoding="utf-8-sig", newline="") as f:
         leitor = csv.DictReader(f)

@@ -13,7 +13,8 @@ from security import verificar_evento, assinar_evento
 load_dotenv()
 
 ESTOQUE_URL = os.getenv("ESTOQUE_URL", "http://localhost:5001")
-
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5002/webhook")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 app = Flask(__name__)
 
 swagger_template = {
@@ -348,5 +349,57 @@ def unsubscribe_promotions():
     enviar_evento_rabbitmq("interesse.promocao.cancelado", {"email": email})
     return jsonify({"message": "Interesse cancelado"}), 200
 
+
+@app.route('/api/test/webhook', methods=['POST'])
+def test_webhook():
+    """
+    Simula o Webhook do Mock de Pagamento
+    ---
+    tags:
+      - Testes
+    parameters:
+      - in: header
+        name: X-Webhook-Token
+        type: string
+        required: true
+        description: WEBHOOK_SECRET
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - orderId
+            - status
+          properties:
+            orderId:
+              type: string
+              example: "4f850d1b"
+            status:
+              type: string
+              enum: ["APROVADO", "RECUSADO"]
+              example: "APROVADO"
+    responses:
+      200:
+        description: Webhook aceito pelo MS Pagamento
+      401:
+        description: Token incorreto (confira o WEBHOOK_SECRET no .env)
+      502:
+        description: MS Pagamento inacessível
+    """
+    token = request.headers.get("X-Webhook-Token", "")
+    data = request.get_json() or {}
+    try:
+        r = requests.post(
+            WEBHOOK_URL,
+            json={"orderId": data.get("orderId"), "status": data.get("status")},
+            headers={"X-Webhook-Token": token},
+            timeout=5,
+        )
+        return (r.text, r.status_code, {"Content-Type": "application/json"})
+    except requests.RequestException as e:
+        return jsonify({"error": f"MS Pagamento inacessível: {e}"}), 502
+
+    
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
