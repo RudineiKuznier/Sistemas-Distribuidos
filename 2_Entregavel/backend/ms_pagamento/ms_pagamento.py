@@ -33,7 +33,6 @@ def publicar(channel, routing_key, dados_evento):
 
 api = Flask(__name__)
 
-
 @api.post('/webhook')
 def webhook():
     #validacao seguranca
@@ -74,35 +73,25 @@ def criar_cobranca(id_pedido):
 
 
 def callback(ch, method, properties, body):
-    try:
-        envelope = json.loads(body.decode('utf-8'))
-
-        if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
-            print(f"    Assinatura inválida! Evento '{method.routing_key}' descartado.")
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-            return
-
-        dados = envelope.get('payload', {})
-        id_pedido = dados.get('id_pedido')
-        print("-" * 40)
-        print(f"Routing Key: {method.routing_key}")
-        print(f"ID do Pedido: {id_pedido}")
-
-        if method.routing_key == 'pedido.estoque_ok':
-            checkout_url = criar_cobranca(id_pedido)
-            publicar(ch, 'pagamento.criado', {
-                "id_pedido": id_pedido,
-                "status": "AGUARDANDO_PAGAMENTO",
-                "checkoutUrl": checkout_url
-            })
-
-        print("-" * 40)
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    except Exception as e:
-        print(f"    [Erro callback pagamento] {e}")
-        ch.basic_ack(delivery_tag=method.delivery_tag)
-
+    envelope = json.loads(body.decode('utf-8'))
+    if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+        print(f"    Assinatura inválida! Evento '{method.routing_key}' descartado.")
+        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        return
+    dados = envelope.get('payload', {})
+    id_pedido = dados.get('id_pedido')
+    print("-" * 40)
+    print(f"Routing Key: {method.routing_key}")
+    print(f"ID do Pedido: {id_pedido}")
+    if method.routing_key == 'pedido.estoque_ok':
+        checkout_url = criar_cobranca(id_pedido)
+        publicar(ch, 'pagamento.criado', {
+            "id_pedido": id_pedido,
+            "status": "AGUARDANDO_PAGAMENTO",
+            "checkoutUrl": checkout_url
+        })
+    print("-" * 40)
+    ch.basic_ack(delivery_tag=method.delivery_tag)
 
 def iniciar_ms_pagamento():
     connection = pika.BlockingConnection(

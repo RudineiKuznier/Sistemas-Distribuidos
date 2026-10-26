@@ -20,7 +20,6 @@ CAMPOS, LINHAS = carregar_estoque()
 ESTOQUE = {l["id"]: int(l["stock"]) for l in LINHAS}
 
 def salvar_estoque():
-    """Grava o estoque atual de volta no CSV (escrita atômica)."""
     for l in LINHAS:
         l["stock"] = str(ESTOQUE[l["id"]])
     tmp = CAMINHO_CSV + ".tmp"

@@ -75,64 +75,57 @@ def enviar_evento_rabbitmq(routing_key, dados_evento):
 
 def consumidor_rabbitmq_worker():
   while True:
-      try:
-          connection = criar_conexao_rabbitmq()
-          channel = connection.channel()
-          channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
-          channel.queue_declare(queue="ms_fila_principal", durable=True)
-          routing_keys = (
-            "pagamento.criado",
-            "pagamento.aprovado",
-            "pagamento.recusado",
-            "pedido.enviado",
-            "pedido.estoque_ok",
-            "estoque.indisponivel",
-          )
-          for rk in routing_keys:
-              channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
-          def callback(ch, method, properties, body):
-              try:
-                  envelope = json.loads(body.decode("utf-8"))
-                  if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
-                      print(f"Assinatura inválida! Evento '{method.routing_key}' descartado.")
-                      ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-                      return
-                  dados = envelope.get("payload", {})
-                  id_pedido = dados.get("id_pedido")
-                  rk = method.routing_key
-                  mapeamento_status = {
-                      "pedido.estoque_ok": "Estoque Confirmado",
-                      "pagamento.criado": "Aguardando Pagamento",
-                      "pagamento.aprovado": "Pagamento Aprovado",
-                      "pagamento.recusado": "Pagamento Recusado",
-                      "pedido.enviado": "Pedido Enviado",
-                      "estoque.indisponivel": "Estoque Indisponível"
-                  }
-                  status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
-
-                  if id_pedido in PEDIDOS:
-                      PEDIDOS[id_pedido]["status"] = status_traduzido
-                      if dados.get("checkoutUrl"):
-                          PEDIDOS[id_pedido]["checkoutUrl"] = dados["checkoutUrl"]
-
-                  notificar_clientes_sse(id_pedido, {
-                      "orderId": id_pedido,
-                      "status": status_traduzido,
-                      "routingKey": rk,
-                      "motivo": dados.get("motivo"),
-                      "checkoutUrl": dados.get("checkoutUrl")
-                  })
-
-                  ch.basic_ack(delivery_tag=method.delivery_tag)
-              except Exception as ex:
-                  print(f"[Error callback] {ex}")
-                  ch.basic_ack(delivery_tag=method.delivery_tag)
-          channel.basic_qos(prefetch_count=1)
-          channel.basic_consume(queue="ms_fila_principal", on_message_callback=callback, auto_ack=False)
-          channel.start_consuming()
-      except Exception as e:
-          print(f"[RabbitMQ Consumer Offline] Reconectando em 5s... Erro: {e}")
-          threading.Event().wait(5)
+    connection = criar_conexao_rabbitmq()
+    channel = connection.channel()
+    channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
+    channel.queue_declare(queue="ms_fila_principal", durable=True)
+    routing_keys = (
+      "pagamento.criado",
+      "pagamento.aprovado",
+      "pagamento.recusado",
+      "pedido.enviado",
+      "pedido.estoque_ok",
+      "estoque.indisponivel",
+    )
+    for rk in routing_keys:
+        channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
+    def callback(ch, method, properties, body):
+        try:
+            envelope = json.loads(body.decode("utf-8"))
+            if not verificar_evento(envelope, CAMINHO_CHAVES_PUBLICAS):
+                print(f"Assinatura inválida! Evento '{method.routing_key}' descartado.")
+                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+                return
+            dados = envelope.get("payload", {})
+            id_pedido = dados.get("id_pedido")
+            rk = method.routing_key
+            mapeamento_status = {
+                "pedido.estoque_ok": "Estoque Confirmado",
+                "pagamento.criado": "Aguardando Pagamento",
+                "pagamento.aprovado": "Pagamento Aprovado",
+                "pagamento.recusado": "Pagamento Recusado",
+                "pedido.enviado": "Pedido Enviado",
+                "estoque.indisponivel": "Estoque Indisponível"
+            }
+            status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
+            if id_pedido in PEDIDOS:
+                PEDIDOS[id_pedido]["status"] = status_traduzido
+                if dados.get("checkoutUrl"):
+                    PEDIDOS[id_pedido]["checkoutUrl"] = dados["checkoutUrl"]
+            notificar_clientes_sse(id_pedido, {
+                "orderId": id_pedido,
+                "status": status_traduzido,
+                "routingKey": rk,
+                "motivo": dados.get("motivo"),
+                "checkoutUrl": dados.get("checkoutUrl")
+            })
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+        except Exception as ex:
+            print(f"[Error callback] {ex}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+    channel.basic_qos(prefetch_count=1)
+    channel.basic_consume(queue="ms_fila_principal", on_message_callback=callback, auto_ack=False)
+    channel.start_consuming()
 
 threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensagens Rabbit segundo plano
 
