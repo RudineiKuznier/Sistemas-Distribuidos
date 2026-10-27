@@ -15,6 +15,8 @@ export function Loja() {
   const [produtos, setProdutos] = useState<Produto[]>([])
   const [carrinho, setCarrinho] = useState<Record<string, number>>({})
   const [orderId, setOrderId] = useState<string | null>(null)
+  const [paymentUrl, setPaymentUrl] = useState<string | null>(null)
+  const [enviando, setEnviando] = useState(false)
 
   const carregarProdutos = useCallback(() => {
     fetch('/api/products', { cache: 'no-store' })
@@ -42,6 +44,10 @@ export function Loja() {
   }
 
   async function finalizar() {
+    if (enviando || itens === 0) return
+    setEnviando(true)
+
+    const aba = window.open('', '_blank')
 
     try {
       const res = await fetch('/api/orders', {
@@ -56,13 +62,19 @@ export function Loja() {
       })
       if (!res.ok) throw new Error('Erro ao criar o pedido')
 
-      const { orderId } = await res.json()
-      setOrderId(orderId) // SSE
+      const { orderId, paymentUrl } = await res.json()
+      if (paymentUrl && aba) aba.location.href = paymentUrl
+      else aba?.close()
+
+      setPaymentUrl(paymentUrl ?? null)
+      setOrderId(orderId)
       setCarrinho({})
-      setTimeout(carregarProdutos, 700) // garante um refetch após a reserva
+      setTimeout(carregarProdutos, 700)
     } catch (e) {
       aba?.close()
       console.error(e instanceof Error ? e.message : 'Erro ao criar o pedido')
+    } finally {
+      setEnviando(false)
     }
   }
 
@@ -71,9 +83,10 @@ export function Loja() {
       <main className="mx-auto max-w-7xl space-y-8 p-4 pb-24">
         <StatusPedido
           orderId={orderId}
+          paymentUrl={paymentUrl}
           categorias={categorias}
           onStatusChange={carregarProdutos}
-        />        
+        />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {produtos.map((p) => (
             <CardImage
@@ -82,13 +95,13 @@ export function Loja() {
               descr={`${p.category} · R$ ${p.price.toFixed(2)}`}
               quantidade={p.stock}
               onAdd={() => adicionar(p)}
-               disabled={p.stock === 0}
+              disabled={p.stock === 0}
             />
           ))}
         </div>
       </main>
 
-     <CartBar itens={itens} onFinalizar={finalizar} />
+      <CartBar itens={itens} onFinalizar={finalizar} />
     </>
   )
 }

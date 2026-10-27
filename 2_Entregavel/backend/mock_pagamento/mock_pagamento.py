@@ -1,14 +1,8 @@
-
-import os
 import requests
 from flask import Flask, request
-from dotenv import load_dotenv
-
-load_dotenv()
 
 app = Flask(__name__)
 COBRANCAS = {}  
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 PAGINA = """
 <h2>Pagamento simulado - Pedido {oid}</h2>
@@ -47,16 +41,10 @@ def resultado(oid):
     if status not in ("APROVADO", "RECUSADO"):
         return {"error": "status inválido"}, 400
 
-    headers = {
-        "Content-Type": "application/json",
-        "X-Webhook-Token": WEBHOOK_SECRET,
-    }
-
     try:
         resposta = requests.post(
             webhook_url,
             json={"orderId": oid, "status": status},
-            headers=headers,
             timeout=3,
         )
         resposta.raise_for_status()

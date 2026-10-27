@@ -14,10 +14,7 @@ resend.api_key = os.getenv("RESEND_API_KEY")
 BASE = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_CHAVES_PUBLICAS = os.path.join(BASE, "chaves_publicas")
 
-INTERVALO_SEGUNDOS = 60
 INTERESSES = {}         
-LOCK = threading.Lock()
-
 
 def enviar_email(email, categoria, desconto):
     try:
@@ -34,18 +31,19 @@ def enviar_email(email, categoria, desconto):
 
 def gerador_promocoes():
     while True:
-        time.sleep(INTERVALO_SEGUNDOS)
-        with LOCK:
-            categorias = {c for cats in INTERESSES.values() for c in cats}
-            if not categorias:
-                continue
-            categoria = random.choice(sorted(categorias))
-            destinatarios = [e for e, cats in INTERESSES.items() if categoria in cats]
+        time.sleep(60)
+
+        interesses = dict(INTERESSES) 
+        categorias = {c for cats in interesses.values() for c in cats}
+        if not categorias:
+            continue
+
+        categoria = random.choice(sorted(categorias))
+        destinatarios = [e for e, cats in interesses.items() if categoria in cats]
 
         print(f"[Promoção] 10% em {categoria} -> {len(destinatarios)} cliente(s)")
         for email in destinatarios:
             enviar_email(email, categoria, 10)
-
 
 def callback(ch, method, properties, body):
     try:
@@ -62,11 +60,11 @@ def callback(ch, method, properties, body):
         print(f"Routing Key: {method.routing_key}")
         print(f"E-mail: {email}")
 
-        with LOCK:
-            if method.routing_key == 'interesse.promocao':
-                INTERESSES[email] = dados.get('categorias', [])
-            elif method.routing_key == 'interesse.promocao.cancelado':
-                INTERESSES.pop(email, None)
+        if dados.get('acao') == 'cancelar':
+            INTERESSES.pop(email, None)
+        else:
+            INTERESSES[email] = dados.get('categorias', [])
+                
         print("-" * 40)
     except Exception as e:
         print(f"    [Erro callback promoções] {e}")
@@ -81,8 +79,7 @@ def iniciar_ms_promocoes():
 
     queue_name = 'ms_fila_promocoes'
     channel.queue_declare(queue=queue_name, durable=True)
-    for rk in ('interesse.promocao', 'interesse.promocao.cancelado'):
-        channel.queue_bind(exchange='eCommerce', queue=queue_name, routing_key=rk)
+    channel.queue_bind(exchange='eCommerce', queue=queue_name, routing_key='interesse.promocao')
 
     print('     Aguardando eventos de promoções. Para sair pressione CTRL+C')
     channel.basic_qos(prefetch_count=1)

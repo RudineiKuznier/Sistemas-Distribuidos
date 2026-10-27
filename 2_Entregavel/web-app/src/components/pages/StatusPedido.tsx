@@ -7,40 +7,30 @@ import { DialogEmail } from '@/components/pages/DialogEmail'
 const ROTULOS: Record<string, string> = {
   'Estoque Confirmado': 'Estoque confirmado',
   'Estoque Indisponível': 'Estoque indisponível',
-  'Aguardando Pagamento': 'Aguardando pagamento',
   'Pagamento Aprovado': 'Pagamento aprovado',
   'Pagamento Recusado': 'Pagamento recusado',
   'Pedido Enviado': 'Pedido enviado',
+  'Pedido Cancelado': 'Pedido cancelado',
 }
 
-const ERROS = ['Pagamento Recusado', 'Estoque Indisponível']
+const ERROS = ['Pagamento Recusado', 'Estoque Indisponível', 'Pedido Cancelado']
 const INICIAIS = ['CRIADO', 'AGUARDANDO']
 
 interface Props {
   orderId: string | null
+  paymentUrl: string | null
   categorias: string[]
   onStatusChange?: () => void
 }
 
-export function StatusPedido({ orderId, categorias, onStatusChange }: Props) {
+export function StatusPedido({
+  orderId,
+  paymentUrl,
+  categorias,
+  onStatusChange,
+}: Props) {
   const [status, setStatus] = useState<string | null>(null)
-  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null)
   const [dialogEmail, setDialogEmail] = useState(false)
-  const abertas = useRef<Set<string>>(new Set()) 
-
-  const deleteProduct = async () => {
-    try {
-      const res = await fetch(`/api/orders/${orderId}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) throw new Error('Erro ao excluir o pedido')
-      alert('Pedido excluído com sucesso!')
-      setStatus(null)
-    } catch (e) {
-      console.error(e)
-      alert('Erro ao excluir o pedido')
-    }
-  }
 
   const callbackRef = useRef(onStatusChange)
   useEffect(() => {
@@ -49,7 +39,6 @@ export function StatusPedido({ orderId, categorias, onStatusChange }: Props) {
 
   useEffect(() => {
     setStatus(null)
-    setCheckoutUrl(null)
     if (!orderId) return
 
     const source = new EventSource(`/api/orders/${orderId}/events`)
@@ -57,27 +46,29 @@ export function StatusPedido({ orderId, categorias, onStatusChange }: Props) {
     source.onmessage = (e) => {
       const evento = JSON.parse(e.data)
       if (!INICIAIS.includes(evento.status)) setStatus(evento.status)
-
-      if (evento.checkoutUrl) {
-        setCheckoutUrl(evento.checkoutUrl)
-        if (!abertas.current.has(evento.checkoutUrl)) {
-          abertas.current.add(evento.checkoutUrl)
-          window.open(evento.checkoutUrl, '_blank')
-        }
-      }
       callbackRef.current?.()
     }
 
     return () => source.close()
   }, [orderId])
 
+  async function cancelarPedido() {
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error()
+    } catch {
+      console.error('Erro ao cancelar o pedido')
+    }
+  }
+
   const erro = status ? ERROS.includes(status) : false
+  const aguardandoPagamento = status === 'Estoque Confirmado'
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {orderId && status && (
               <>
                 <CardTitle className="text-sm">Pedido {orderId}</CardTitle>
@@ -91,9 +82,11 @@ export function StatusPedido({ orderId, categorias, onStatusChange }: Props) {
                 >
                   {ROTULOS[status] ?? status}
                 </Badge>
-                <Button variant="default" onClick={() => deleteProduct()}>
-                  Excluir pedido
-                </Button>
+                {aguardandoPagamento && (
+                  <Button size="sm" variant="outline" onClick={cancelarPedido}>
+                    Cancelar pedido
+                  </Button>
+                )}
               </>
             )}
           </div>

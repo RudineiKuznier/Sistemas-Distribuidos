@@ -2,19 +2,17 @@ import os
 import json
 import uuid
 import queue
+import time
 import threading
 import pika
 import requests
 from flask import Flask, jsonify, request, Response
 from flasgger import Swagger
-from dotenv import load_dotenv
 from security import verificar_evento, assinar_evento
 
-load_dotenv()
-
+PAGAMENTO_URL = os.getenv("PAGAMENTO_URL", "http://localhost:5002")
 ESTOQUE_URL = os.getenv("ESTOQUE_URL", "http://localhost:5001")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "http://localhost:5002/webhook")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
 app = Flask(__name__)
 
 swagger_template = {
@@ -27,10 +25,9 @@ swagger_template = {
 }
 
 swagger = Swagger(app, template=swagger_template)
-
 PEDIDOS = {}
-
 sse_subscribers = {}
+ESTOQUE_EVENTS = {}
 
 CAMINHO_CHAVE_PRIVADA = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -41,6 +38,8 @@ CAMINHO_CHAVES_PUBLICAS = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "chaves_publicas"
 )
+
+STATUS_FINAIS = ("Pagamento Aprovado", "Pedido Enviado", "Pedido Cancelado")
 
 def notificar_clientes_sse(id_pedido, dados_evento):
     if id_pedido in sse_subscribers:
@@ -73,14 +72,22 @@ def enviar_evento_rabbitmq(routing_key, dados_evento):
     except Exception as e:
         print(f"[RabbitMQ Producer Error] {e}")
 
+MAPEAMENTO_STATUS = {
+  "pedido.estoque_ok": "Estoque Confirmado",
+  "pagamento.aprovado": "Pagamento Aprovado",
+  "pagamento.recusado": "Pagamento Recusado",
+  "pedido.enviado": "Pedido Enviado",
+  "estoque.indisponivel": "Estoque Indisponível"
+}
+
 def consumidor_rabbitmq_worker():
   while True:
     connection = criar_conexao_rabbitmq()
     channel = connection.channel()
     channel.exchange_declare(exchange="eCommerce", exchange_type="direct")
     channel.queue_declare(queue="ms_fila_principal", durable=True)
+
     routing_keys = (
-      "pagamento.criado",
       "pagamento.aprovado",
       "pagamento.recusado",
       "pedido.enviado",
@@ -89,6 +96,7 @@ def consumidor_rabbitmq_worker():
     )
     for rk in routing_keys:
         channel.queue_bind(exchange="eCommerce", queue="ms_fila_principal", routing_key=rk)
+    
     def callback(ch, method, properties, body):
         try:
             envelope = json.loads(body.decode("utf-8"))
@@ -96,38 +104,55 @@ def consumidor_rabbitmq_worker():
                 print(f"Assinatura inválida! Evento '{method.routing_key}' descartado.")
                 ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
                 return
+            
             dados = envelope.get("payload", {})
             id_pedido = dados.get("id_pedido")
             rk = method.routing_key
-            mapeamento_status = {
-                "pedido.estoque_ok": "Estoque Confirmado",
-                "pagamento.criado": "Aguardando Pagamento",
-                "pagamento.aprovado": "Pagamento Aprovado",
-                "pagamento.recusado": "Pagamento Recusado",
-                "pedido.enviado": "Pedido Enviado",
-                "estoque.indisponivel": "Estoque Indisponível"
-            }
-            status_traduzido = mapeamento_status.get(rk, "STATUS_DESCONHECIDO")
-            if id_pedido in PEDIDOS:
-                PEDIDOS[id_pedido]["status"] = status_traduzido
-                if dados.get("checkoutUrl"):
-                    PEDIDOS[id_pedido]["checkoutUrl"] = dados["checkoutUrl"]
+
+            pedido = PEDIDOS.get(id_pedido)
+            if pedido and pedido["status"] == "Pedido Cancelado":
+              ch.basic_ack(delivery_tag=method.delivery_tag)
+              return
+
+            status_traduzido = MAPEAMENTO_STATUS.get(rk, "STATUS_DESCONHECIDO")
+            if pedido:
+              pedido["status"] = status_traduzido
+
             notificar_clientes_sse(id_pedido, {
                 "orderId": id_pedido,
                 "status": status_traduzido,
                 "routingKey": rk,
-                "motivo": dados.get("motivo"),
-                "checkoutUrl": dados.get("checkoutUrl")
+                "motivo": dados.get("motivo")
             })
+
+            if rk in ("pedido.estoque_ok", "estoque.indisponivel"):
+              ev = ESTOQUE_EVENTS.get(id_pedido)
+              if ev:
+                  ev.set()
+
             ch.basic_ack(delivery_tag=method.delivery_tag)
+
         except Exception as ex:
             print(f"[Error callback] {ex}")
             ch.basic_ack(delivery_tag=method.delivery_tag)
+
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue="ms_fila_principal", on_message_callback=callback, auto_ack=False)
     channel.start_consuming()
 
 threading.Thread(target=consumidor_rabbitmq_worker, daemon=True).start() #mensagens Rabbit segundo plano
+
+#Consulta até a cobrança existir
+def buscar_checkout_url(order_id, tentativas=10):
+    for _ in range(tentativas):
+        try:
+            r = requests.get(f"{PAGAMENTO_URL}/charges/{order_id}", timeout=2)
+            if r.status_code == 200:
+                return r.json()["checkoutUrl"]
+        except requests.RequestException:
+            pass
+        time.sleep(0.3)
+    return None
 
 @app.route('/api/products', methods=['GET'])
 def get_products():
@@ -166,10 +191,10 @@ def create_order():
                 properties:
                   productId:
                     type: string
-                    example: "camisa"
+                    example: "5"
                   quantity:
                     type: integer
-                    example: 2
+                    example: 1
     responses:
       201:
         description: Pedido criado com sucesso. Retorna orderId e a URL do mock de pagamento.
@@ -183,7 +208,7 @@ def create_order():
               type: string
               example: "http://localhost:5173/pagamento?orderId=p101"
       400:
-        description: Nenhum item informado
+        description: Requisição inválida sem itens.
     """
     data = request.get_json() or {}
     items = data.get('items', [])
@@ -204,24 +229,49 @@ def create_order():
         "status": "CRIADO"
     }
 
-    payload = {
+    evento = threading.Event()
+    ESTOQUE_EVENTS[order_id] = evento
+
+    enviar_evento_rabbitmq("pedido.criado", {
         "id_pedido": order_id,
         "produtos": produtos_formatados,
         "status": "CRIADO"
-    }
-    enviar_evento_rabbitmq("pedido.criado", payload)
+    })
 
-    return jsonify({
-        "orderId": order_id
-    }), 201
+    evento.wait(timeout=8)
+    ESTOQUE_EVENTS.pop(order_id, None)
+
+    payment_url = None
+    if PEDIDOS[order_id]["status"] == "Estoque Confirmado":
+        payment_url = buscar_checkout_url(order_id)
+
+    return jsonify({"orderId": order_id, "paymentUrl": payment_url}), 201
 
 @app.route('/api/orders/<order_id>', methods=['DELETE'])
 def delete_order(order_id):
-    if order_id not in PEDIDOS:
-        return jsonify({"error": "Pedido não encontrado"}), 404
+    """
+    Cancelar pedido e publicar 'pedido.excluido' no RabbitMQ
+    ---
+    tags:
+      - Catálogo e Pedidos
+    parameters:
+      - name: order_id
+        in: path
+        type: string
+        required: true
+    responses:
+      200:
+        description: Pedido cancelado
+    """
 
+    pedido = PEDIDOS.get(order_id)
+    if not pedido:
+        return jsonify({"error": "Pedido não encontrado"}), 404
+    if pedido["status"] in STATUS_FINAIS:
+        return jsonify({"error": "Pedido não pode mais ser cancelado"}), 409
+
+    pedido["status"] = "Pedido Cancelado"
     enviar_evento_rabbitmq("pedido.excluido", {"id_pedido": order_id})
-    PEDIDOS[order_id]["status"] = "CANCELADO"
     notificar_clientes_sse(order_id, {
         "orderId": order_id,
         "status": "Pedido Cancelado",
@@ -232,7 +282,7 @@ def delete_order(order_id):
 
 @app.route('/api/orders/<order_id>/events', methods=['GET'])
 def sse_order_stream(order_id):
-    """
+  """
     Canal de acompanhamento do pedido em tempo real (SSE)
     ---
     tags:
@@ -249,23 +299,23 @@ def sse_order_stream(order_id):
       200:
         description: Conexão SSE estabelecida com sucesso
     """
-    def event_stream():
-        q = queue.Queue()
-        if order_id not in sse_subscribers:
-            sse_subscribers[order_id] = []
-        sse_subscribers[order_id].append(q)
+  def event_stream():
+    q = queue.Queue()
+    if order_id not in sse_subscribers:
+        sse_subscribers[order_id] = []
+    sse_subscribers[order_id].append(q)
 
-        pedido = PEDIDOS.get(order_id, {})
-        yield f"data: {json.dumps({'orderId': order_id, 'status': pedido.get('status', 'AGUARDANDO'), 'checkoutUrl': pedido.get('checkoutUrl')})}\n\n"
+    pedido = PEDIDOS.get(order_id, {})
+    yield f"data: {json.dumps({'orderId': order_id, 'status': pedido.get('status', 'AGUARDANDO'), 'checkoutUrl': pedido.get('checkoutUrl')})}\n\n"
+   
+    try:
+        while True:
+            data = q.get()
+            yield f"data: {json.dumps(data)}\n\n"
+    except GeneratorExit:
+        sse_subscribers[order_id].remove(q)
 
-        try:
-            while True:
-                data = q.get()
-                yield f"data: {json.dumps(data)}\n\n"
-        except GeneratorExit:
-            sse_subscribers[order_id].remove(q)
-
-    return Response(event_stream(), mimetype="text/event-stream")
+  return Response(event_stream(), mimetype="text/event-stream")
 
 @app.route('/api/promotions/subscriptions', methods=['POST'])
 def subscribe_promotions():
@@ -294,8 +344,6 @@ def subscribe_promotions():
     responses:
       200:
         description: Interesse registrado
-      400:
-        description: E-mail não informado
     """
     data = request.get_json() or {}
     email = data.get('email')
@@ -305,6 +353,7 @@ def subscribe_promotions():
         return jsonify({"error": "E-mail é obrigatório"}), 400
 
     enviar_evento_rabbitmq("interesse.promocao", {
+        "acao": "inscrever",
         "email": email,
         "categorias": categories
     })
@@ -332,67 +381,18 @@ def unsubscribe_promotions():
     responses:
       200:
         description: Interesse cancelado
-      400:
-        description: E-mail não informado
     """
     email = (request.get_json() or {}).get('email')
     if not email:
         return jsonify({"error": "E-mail é obrigatório"}), 400
 
-    enviar_evento_rabbitmq("interesse.promocao.cancelado", {"email": email})
+    enviar_evento_rabbitmq("interesse.promocao", {
+        "acao": "cancelar",
+        "email": email,
+        "categorias": []
+    })
     return jsonify({"message": "Interesse cancelado"}), 200
-
-
-@app.route('/api/test/webhook', methods=['POST'])
-def test_webhook():
-    """
-    Simula o Webhook do Mock de Pagamento
-    ---
-    tags:
-      - Testes
-    parameters:
-      - in: header
-        name: X-Webhook-Token
-        type: string
-        required: true
-        description: WEBHOOK_SECRET
-      - in: body
-        name: body
-        required: true
-        schema:
-          type: object
-          required:
-            - orderId
-            - status
-          properties:
-            orderId:
-              type: string
-              example: "4f850d1b"
-            status:
-              type: string
-              enum: ["APROVADO", "RECUSADO"]
-              example: "APROVADO"
-    responses:
-      200:
-        description: Webhook aceito pelo MS Pagamento
-      401:
-        description: Token incorreto (confira o WEBHOOK_SECRET no .env)
-      502:
-        description: MS Pagamento inacessível
-    """
-    token = request.headers.get("X-Webhook-Token", "")
-    data = request.get_json() or {}
-    try:
-        r = requests.post(
-            WEBHOOK_URL,
-            json={"orderId": data.get("orderId"), "status": data.get("status")},
-            headers={"X-Webhook-Token": token},
-            timeout=5,
-        )
-        return (r.text, r.status_code, {"Content-Type": "application/json"})
-    except requests.RequestException as e:
-        return jsonify({"error": f"MS Pagamento inacessível: {e}"}), 502
 
     
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)  
