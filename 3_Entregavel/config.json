@@ -1,0 +1,6 @@
+{
+  "node1": "localhost:50051",
+  "node2": "localhost:50052",
+  "node3": "localhost:50053",
+  "node4": "localhost:50054"
+}
