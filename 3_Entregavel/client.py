@@ -15,7 +15,7 @@ def run_client():
     stub = cluster_pb2_grpc.NodeServiceStub(channel)
 
     print(f"--- Cliente conectando ao {target_node_id} ({target_address}) ---")
-    print("Comandos disponíveis: PING, PUT <chave> <valor>, GET <chave>, SAIR")
+    print("Comandos: PING, PUT <chave> <valor>, TEST_COMMIT, SAIR")
 
     while True:
         try:
