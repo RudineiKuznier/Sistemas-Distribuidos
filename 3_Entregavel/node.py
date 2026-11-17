@@ -99,8 +99,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.voted_for = ""
             self.leader_id = ""
             self.role = "SEGUIDOR"
-            self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
+            self._reset_election_timer()
             self._save_state()
             if was_leader:
                 self._on_step_down()
@@ -112,6 +111,18 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         self.cond_events.clear()
         self.followers_match.clear()
         self.last_fetch_from.clear()
+
+    def _reset_election_timer(self):
+        """Reinicia o timer que dispara eleição se o líder sumir."""
+        self.last_heartbeat_time = time.time()
+        self.election_timeout = random.uniform(*self.ELECTION_RANGE)
+
+    def _adopt_leader(self, leader_id):
+        """Confirma o líder atual e reinicia o timer (chamado por seguidores)."""
+        if self.leader_id != leader_id:
+            print(f"[{self.node_id}] Descobriu LÍDER: {leader_id}")
+        self.leader_id = leader_id
+        self.last_heartbeat_time = time.time()
 
     # ----- Commit & aplicação -----
 
@@ -181,8 +192,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
             self.voted_for = request.candidate_id
             self.leader_id = request.candidate_id
-            self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
+            self._reset_election_timer()
             self._save_state()
             print(f"[{self.node_id}] Votou em {request.candidate_id} (Termo {request.term})")
             return cluster_pb2.VoteResponse(term=self.current_term, vote_granted=True)
@@ -356,8 +366,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.current_term += 1
             self.voted_for = self.node_id
             self.leader_id = ""
-            self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
+            self._reset_election_timer()
             self._save_state()
             term = self.current_term
             print(f"[{self.node_id}] >>> Iniciando ELEIÇÃO Termo {term} <<<")
@@ -436,10 +445,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
                             # Follower consistente com líder
                             if response.success and response.leader_id:
-                                if self.leader_id != response.leader_id:
-                                    print(f"[{self.node_id}] Descobriu LÍDER: {response.leader_id}")
-                                self.leader_id = response.leader_id
-                                self.last_heartbeat_time = time.time()
+                                self._adopt_leader(response.leader_id)
 
                                 # Aplica novas entradas
                                 for entry in response.entries:
@@ -457,10 +463,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
                             # LOG_MISMATCH: respondente é o próprio líder
                             elif not response.success and response.leader_id == target_id:
-                                if self.leader_id != response.leader_id:
-                                    print(f"[{self.node_id}] Descobriu LÍDER: {response.leader_id}")
-                                self.leader_id = response.leader_id
-                                self.last_heartbeat_time = time.time()
+                                self._adopt_leader(response.leader_id)
 
                                 if response.conflict_index < len(self.log):
                                     self._truncate_log(response.conflict_index)
