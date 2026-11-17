@@ -361,6 +361,14 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         except Exception:
             return None
 
+    def _become_leader(self, term):
+        """Transição CANDIDATO → LÍDER após obter quórum."""
+        self.role = "LIDER"
+        self.leader_id = self.node_id
+        self.last_heartbeat_time = time.time()
+        self._save_state()
+        print(f"[{self.node_id}] ### ELEITO LÍDER (Termo {term}) ###")
+
     def _start_election(self):
         with self.lock:
             if self.role == "LIDER" or self.election_in_progress:
@@ -396,12 +404,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                     if response.vote_granted:
                         votes += 1
                         if votes >= self.QUORUM:
-                            self.role = "LIDER"
-                            self.leader_id = self.node_id
-                            self.last_heartbeat_time = time.time()
-                            self._save_state()
-                            print(f"[{self.node_id}] Assumiu liderança. Aguardando FetchRequests.")
-                            print(f"[{self.node_id}] ### ELEITO LÍDER (Termo {term}) ###")
+                            self._become_leader(term)
                             won = True
                             break
             executor.shutdown(wait=False)
