@@ -318,12 +318,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         with self.lock:
             role, leader, term, commit = self.role, self.leader_id, self.current_term, self.commit_index
 
-        if request.operation == "PING":
-            return cluster_pb2.ClientResponseMsg(
-                success=True,
-                message=f"PONG de {self.node_id} | Papel={role} | Termo={term} | Commit={commit}",
-                leader_id=leader)
-
         if request.operation == "STATUS":
             with self.lock:
                 extra = ""

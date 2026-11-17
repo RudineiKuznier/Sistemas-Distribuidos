@@ -57,7 +57,7 @@ def run_client():
     cli = ClusterClient(config, initial_node)
 
     print(f"--- Cliente conectado a {initial_node} ({config[initial_node]}) ---")
-    print("Comandos: PING, STATUS, PUT <chave> <valor>, GET <chave>, SAIR")
+    print("Comandos: STATUS, PUT <chave> <valor>, GET <chave>, SAIR")
 
     while True:
         try:
