@@ -76,15 +76,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             with open(db_file, "r") as f:
                 self.db = json.load(f)
 
-        # Reaplica log até commit_index para garantir consistência pós-crash
-        if self.commit_index > 0:
-            for idx in range(1, min(self.commit_index, len(self.log)) + 1):
-                parts = self.log[idx - 1].command.split()
-                if len(parts) >= 3 and parts[0] == "PUT":
-                    self.db[parts[1]] = parts[2]
-            with open(db_file, "w") as f:
-                json.dump(self.db, f)
-
     def _save_state(self):
         """Salva o estado no disco."""
         state_file = os.path.join(self.data_dir, "state.json")
