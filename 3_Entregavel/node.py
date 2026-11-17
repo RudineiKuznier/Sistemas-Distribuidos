@@ -256,6 +256,48 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                 entries=self.log[L:]
             )
 
+    def _handle_put(self, request):
+        """Fluxo: pré-checa quórum -> append -> bloqueia até commit ou timeout -> responde."""
+        with self.lock:
+            if self.role != "LIDER":
+                return cluster_pb2.ClientResponseMsg(
+                    success=False,
+                    message=f"Não sou líder. Tente: {self.leader_id or '?'}",
+                    leader_id=self.leader_id)
+
+            active = count_active_followers(
+                self.last_fetch_from, self.node_id, self.config, self.HEARTBEAT_TIMEOUT
+            )
+            if 1 + active < self.QUORUM:
+                return cluster_pb2.ClientResponseMsg(
+                    success=False,
+                    message=f"Sem quórum: {1+active}/{self.QUORUM} nós ativos. Escrita rejeitada.",
+                    leader_id=self.node_id)
+
+            entry = self._append_log(f"PUT {request.key} {request.value}")
+            event = threading.Event()
+            self.cond_events[entry.index] = event
+            print(f"[{self.node_id}] PUT recebido: {request.key}={request.value} → idx={entry.index} (aguardando commit)")
+
+        signaled = event.wait(timeout=self.PUT_TIMEOUT)
+
+        with self.lock:
+            self.cond_events.pop(entry.index, None)
+            if not signaled:
+                return cluster_pb2.ClientResponseMsg(
+                    success=False,
+                    message=f"Timeout aguardando commit (idx={entry.index}). Não comitado.",
+                    leader_id=self.leader_id)
+            if self.commit_index >= entry.index:
+                return cluster_pb2.ClientResponseMsg(
+                    success=True,
+                    message=f"PUT confirmado (idx={entry.index}, commit={self.commit_index})",
+                    leader_id=self.node_id)
+            return cluster_pb2.ClientResponseMsg(
+                success=False,
+                message=f"Liderança perdida antes do commit (idx={entry.index})",
+                leader_id=self.leader_id or "")
+
     def ClientRequest(self, request, context):
         """RPC para processar requisições de clientes."""
         with self.lock:
@@ -285,45 +327,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                 leader_id=leader)
 
         if request.operation == "PUT":
-            with self.lock:
-                if self.role != "LIDER":
-                    return cluster_pb2.ClientResponseMsg(
-                        success=False,
-                        message=f"Não sou líder. Tente: {self.leader_id or '?'}",
-                        leader_id=self.leader_id)
-
-                active = count_active_followers(
-                    self.last_fetch_from, self.node_id, self.config, self.HEARTBEAT_TIMEOUT
-                )
-                if 1 + active < self.QUORUM:
-                    return cluster_pb2.ClientResponseMsg(
-                        success=False,
-                        message=f"Sem quórum: {1+active}/{self.QUORUM} nós ativos. Escrita rejeitada.",
-                        leader_id=self.node_id)
-
-                entry = self._append_log(f"PUT {request.key} {request.value}")
-                event = threading.Event()
-                self.cond_events[entry.index] = event
-                print(f"[{self.node_id}] PUT recebido: {request.key}={request.value} → idx={entry.index} (aguardando commit)")
-
-            signaled = event.wait(timeout=self.PUT_TIMEOUT)
-
-            with self.lock:
-                self.cond_events.pop(entry.index, None)
-                if not signaled:
-                    return cluster_pb2.ClientResponseMsg(
-                        success=False,
-                        message=f"Timeout aguardando commit (idx={entry.index}). Não comitado.",
-                        leader_id=self.leader_id)
-                if self.commit_index >= entry.index:
-                    return cluster_pb2.ClientResponseMsg(
-                        success=True,
-                        message=f"PUT confirmado (idx={entry.index}, commit={self.commit_index})",
-                        leader_id=self.node_id)
-                return cluster_pb2.ClientResponseMsg(
-                    success=False,
-                    message=f"Liderança perdida antes do commit (idx={entry.index})",
-                    leader_id=self.leader_id or "")
+            return self._handle_put(request)
 
         return cluster_pb2.ClientResponseMsg(success=False, message="Operação não implementada")
 
