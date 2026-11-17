@@ -199,6 +199,12 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
     def Fetch(self, request, context):
         """RPC para replicação de log e heartbeat."""
+
+        # Três casos:
+        # 1) follower à frente do líder: trunca até o tamanho do líder
+        # 2) mesmo índice, termo diverge: conflict_index específico
+        # 3) consistente: aplica novas entries e avança commit_index
+        
         with self.lock:
             if request.term > self.current_term:
                 self._update_term(request.term)
@@ -370,6 +376,12 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         print(f"[{self.node_id}] ### ELEITO LÍDER (Termo {term}) ###")
 
     def _start_election(self):
+        # Fluxo: 
+        # 1) incrementa termo e vota em si mesmo; 
+        # 2) envia RequestVote para todos; 
+        # 3) vence se atingir QUÓRUM votos.
+        # 4) Se receber termo maior, volta a SEGUIDOR.
+        # Um seguidor envia voto se ainda não votou no termo e seu log é pelo menos tão atualizado quanto o candidato.
         with self.lock:
             if self.role == "LIDER" or self.election_in_progress:
                 return
