@@ -10,18 +10,21 @@ import threading
 from concurrent import futures
 import cluster_pb2
 import cluster_pb2_grpc
+from persistence import Persistence
+from helpers import apply_commands_to_db, count_active_followers, last_log_idx_term
 
 class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
     QUORUM = 3
     HEARTBEAT_TIMEOUT = 0.35
     PUT_TIMEOUT = 5.0
+    ELECTION_RANGE = (0.4, 0.8)
 
     def __init__(self, node_id, config):
         self.node_id = node_id
         self.config = config
-        self.data_dir = f"data/{node_id}"
-        
+        self.persistence = Persistence(f"data/{node_id}")
+
         # Estado em memória
         self.current_term = 0
         self.voted_for = ""
@@ -32,7 +35,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         self.leader_id = ""
         self.lock = threading.Lock()
         self.last_heartbeat_time = time.time()
-        self.election_timeout = random.uniform(0.4, 0.8)
+        self.election_timeout = random.uniform(*self.ELECTION_RANGE)
         self.election_in_progress = False
         self.running = True
 
@@ -49,79 +52,38 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
     def _init_persistence(self):
         """Recupera o estado do disco na inicialização do nó."""
-        os.makedirs(self.data_dir, exist_ok=True)
-        
-        # Carregar estado (Termo, Voto, Commit)
-        state_file = os.path.join(self.data_dir, "state.json")
-        if os.path.exists(state_file):
-            with open(state_file, "r") as f:
-                state = json.load(f)
-                self.current_term = state.get("current_term", 0)
-                self.voted_for = state.get("voted_for", "")
-                self.commit_index = state.get("commit_index", 0)
-        
-        # Carregar log
-        log_file = os.path.join(self.data_dir, "log.jsonl")
-        if os.path.exists(log_file):
-            with open(log_file, "r") as f:
-                for line in f:
-                    if line.strip():
-                        data = json.loads(line)
-                        self.log.append(cluster_pb2.LogEntry(term=data["term"], index=data["index"], command=data["command"]))
-        
-        # Carregar banco
-        db_file = os.path.join(self.data_dir, "db.json")
-        if os.path.exists(db_file):
-            with open(db_file, "r") as f:
-                self.db = json.load(f)
+        self.current_term, self.voted_for, self.commit_index = self.persistence.load_state()
+        for d in self.persistence.load_log():
+            self.log.append(cluster_pb2.LogEntry(
+                term=d["term"], index=d["index"], command=d["command"]
+            ))
+        self.db = self.persistence.load_db()
 
     def _save_state(self):
-        """Salva o estado no disco."""
-        state_file = os.path.join(self.data_dir, "state.json")
-        with open(state_file, "w") as f:
-            json.dump({
-                "current_term": self.current_term,
-                "voted_for": self.voted_for,
-                "commit_index": self.commit_index
-            }, f)
+        self.persistence.save_state(self.current_term, self.voted_for, self.commit_index)
 
     def _append_log(self, command):
-        """Adiciona uma nova entrada no log local."""
-        new_index = len(self.log) + 1
-        entry = cluster_pb2.LogEntry(term=self.current_term, index=new_index, command=command)
+        entry = cluster_pb2.LogEntry(term=self.current_term, index=len(self.log) + 1, command=command)
         self.log.append(entry)
-        
-        log_file = os.path.join(self.data_dir, "log.jsonl")
-        with open(log_file, "a") as f:
-            f.write(json.dumps({"term": entry.term, "index": entry.index, "command": entry.command}) + "\n")
+        self.persistence.append_log(entry)
         return entry
 
     def _append_entry_from_leader(self, entry):
-        log_file = os.path.join(self.data_dir, "log.jsonl")
-        with open(log_file, "a") as f:
-            f.write(json.dumps({"term": entry.term, "index": entry.index, "command": entry.command}) + "\n")
         self.log.append(entry)
+        self.persistence.append_log(entry)
 
     def _truncate_log(self, new_len):
-        """Trunca o log em memória, reescreve log.jsonl e limita commit_index."""
+        """Trunca o log em memória e persiste no disco. Se commit_index > new_len, ajusta commit_index."""
         if new_len >= len(self.log):
             return
 
         old_len = len(self.log)
         self.log = self.log[:new_len]
-
-        log_file = os.path.join(self.data_dir, "log.jsonl")
-        with open(log_file, "w") as f:
-            for entry in self.log:
-                f.write(json.dumps({
-                    "term": entry.term, "index": entry.index, "command": entry.command
-                }) + "\n")
-
+        self.persistence.rewrite_log(self.log)
         if self.commit_index > new_len:
             self.commit_index = new_len
             self._save_state()
-
-        print(f"[{self.node_id}] TRUNCOU log: {old_len} → {new_len} entradas")   
+        print(f"[{self.node_id}] TRUNCOU log: {old_len} → {new_len} entradas")
 
     def _get_stub(self, target_id):
         if target_id not in self.channels:
@@ -138,7 +100,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.leader_id = ""
             self.role = "SEGUIDOR"
             self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(0.4, 0.8)
+            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
             self._save_state()
             if was_leader:
                 self._on_step_down()
@@ -154,14 +116,12 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
     # ----- Commit & aplicação -----
 
     def _advance_commit(self):
-        """Chamado com lock. Avança commit_index se houver quórum."""
+        """Avança commit_index se houver quórum."""
         if self.role != "LIDER":
             return
 
         match = {self.node_id: len(self.log)}
-        for fid, m in self.followers_match.items():
-            match[fid] = m
-
+        match.update(self.followers_match)
         if len(match) < self.QUORUM:
             return
 
@@ -176,14 +136,8 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
         old_commit = self.commit_index
         self.commit_index = candidate
-
-        for idx in range(old_commit + 1, candidate + 1):
-            parts = self.log[idx - 1].command.split()
-            if len(parts) >= 3 and parts[0] == "PUT":
-                self.db[parts[1]] = parts[2]
-
-        with open(os.path.join(self.data_dir, "db.json"), "w") as f:
-            json.dump(self.db, f)
+        apply_commands_to_db(self.db, self.log, old_commit, candidate)
+        self.persistence.save_db(self.db)
         self._save_state()
 
         print(f"[{self.node_id}] Commit {old_commit}→{candidate} (match={match})")
@@ -194,18 +148,14 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                 ev.set()
 
     def _apply_committed_to_db(self, new_commit):
-        """Chamado pelo seguidor com lock. Aplica entries commitadas."""
+        """Aplica ao banco de dados local todas as entradas de log entre commit_index+1 e new_commit."""
         new_commit = min(new_commit, len(self.log))
         if new_commit <= self.commit_index:
             return
         old = self.commit_index
-        for idx in range(old + 1, new_commit + 1):
-            parts = self.log[idx - 1].command.split()
-            if len(parts) >= 3 and parts[0] == "PUT":
-                self.db[parts[1]] = parts[2]
+        apply_commands_to_db(self.db, self.log, old, new_commit)
         self.commit_index = new_commit
-        with open(os.path.join(self.data_dir, "db.json"), "w") as f:
-            json.dump(self.db, f)
+        self.persistence.save_db(self.db)
         self._save_state()
         print(f"[{self.node_id}] Commit {old}→{new_commit} (via líder)")
 
@@ -223,8 +173,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             if self.voted_for and self.voted_for != request.candidate_id:
                 return cluster_pb2.VoteResponse(term=self.current_term, vote_granted=False)
 
-            my_idx = self.log[-1].index if self.log else 0
-            my_term = self.log[-1].term if self.log else 0
+            my_idx, my_term = last_log_idx_term(self.log)
             log_ok = (request.last_log_term > my_term) or \
                      (request.last_log_term == my_term and request.last_log_index >= my_idx)
             if not log_ok:
@@ -233,12 +182,13 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.voted_for = request.candidate_id
             self.leader_id = request.candidate_id
             self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(0.4, 1.2)
+            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
             self._save_state()
             print(f"[{self.node_id}] Votou em {request.candidate_id} (Termo {request.term})")
             return cluster_pb2.VoteResponse(term=self.current_term, vote_granted=True)
 
     def Fetch(self, request, context):
+        """RPC para replicação de log e heartbeat."""
         with self.lock:
             if request.term > self.current_term:
                 self._update_term(request.term)
@@ -252,7 +202,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                     leader_id=self.leader_id if self.leader_id else ""
                 )
 
-            # Sou líder
+            # Se for líder, atualiza o timestamp do último heartbeat recebido do seguidor
             self.last_fetch_from[request.follower_id] = time.time()
             L = request.last_log_index
             T = request.last_log_term
@@ -261,7 +211,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             if L > len(self.log):
                 conflict = len(self.log)
                 print(f"[{self.node_id}] LOG_MISMATCH {request.follower_id} à frente "
-                    f"(L={L} > len={len(self.log)}) → conflict={conflict}")
+                      f"(L={L} > len={len(self.log)}) → conflict={conflict}")
                 return cluster_pb2.FetchResponse(
                     term=self.current_term, success=False,
                     conflict_index=conflict,
@@ -271,15 +221,14 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
             # CASO 2: divergência de termo em L
             if L > 0 and self.log[L - 1].term != T:
-                # Primeiro índice do nosso log com termo > T (follower trunca até lá)
                 conflict = 0
                 for i in range(L):
                     if self.log[i].term > T:
                         conflict = i
                         break
                 print(f"[{self.node_id}] LOG_MISMATCH {request.follower_id} "
-                    f"(L={L}, T={T}) vs log[L-1].term={self.log[L-1].term} "
-                    f"→ conflict={conflict}")
+                      f"(L={L}, T={T}) vs log[L-1].term={self.log[L-1].term} "
+                      f"→ conflict={conflict}")
                 return cluster_pb2.FetchResponse(
                     term=self.current_term, success=False,
                     conflict_index=conflict,
@@ -291,25 +240,23 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.followers_match[request.follower_id] = L
             self._advance_commit()
 
-            entries = self.log[L:]
             return cluster_pb2.FetchResponse(
                 term=self.current_term, success=True,
                 leader_id=self.node_id, commit_index=self.commit_index,
-                entries=entries
+                entries=self.log[L:]
             )
 
     def ClientRequest(self, request, context):
         """RPC para processar requisições de clientes."""
         with self.lock:
-            role, leader, term, commit = self.role, self.leader_id, self.current_term, self.commit_index
+            leader = self.leader_id
 
         if request.operation == "STATUS":
             with self.lock:
                 extra = ""
                 if self.role == "LIDER":
-                    active = sum(
-                        1 for f in self.config if f != self.node_id
-                        and time.time() - self.last_fetch_from.get(f, 0) < self.HEARTBEAT_TIMEOUT
+                    active = count_active_followers(
+                        self.last_fetch_from, self.node_id, self.config, self.HEARTBEAT_TIMEOUT
                     )
                     extra = f" | Ativos={1+active}/4 | Match={dict(self.followers_match)}"
                 return cluster_pb2.ClientResponseMsg(
@@ -328,8 +275,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                 leader_id=leader)
 
         if request.operation == "PUT":
-            entry = None
-            event = None
             with self.lock:
                 if self.role != "LIDER":
                     return cluster_pb2.ClientResponseMsg(
@@ -337,11 +282,8 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                         message=f"Não sou líder. Tente: {self.leader_id or '?'}",
                         leader_id=self.leader_id)
 
-                # Pré-checagem de quórum (R2/R3)
-                now = time.time()
-                active = sum(
-                    1 for f in self.config if f != self.node_id
-                    and now - self.last_fetch_from.get(f, 0) < self.HEARTBEAT_TIMEOUT
+                active = count_active_followers(
+                    self.last_fetch_from, self.node_id, self.config, self.HEARTBEAT_TIMEOUT
                 )
                 if 1 + active < self.QUORUM:
                     return cluster_pb2.ClientResponseMsg(
@@ -354,7 +296,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                 self.cond_events[entry.index] = event
                 print(f"[{self.node_id}] PUT recebido: {request.key}={request.value} → idx={entry.index} (aguardando commit)")
 
-            # Bloqueio FORA do lock
             signaled = event.wait(timeout=self.PUT_TIMEOUT)
 
             with self.lock:
@@ -369,11 +310,10 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                         success=True,
                         message=f"PUT confirmado (idx={entry.index}, commit={self.commit_index})",
                         leader_id=self.node_id)
-                else:
-                    return cluster_pb2.ClientResponseMsg(
-                        success=False,
-                        message=f"Liderança perdida antes do commit (idx={entry.index})",
-                        leader_id=self.leader_id or "")
+                return cluster_pb2.ClientResponseMsg(
+                    success=False,
+                    message=f"Liderança perdida antes do commit (idx={entry.index})",
+                    leader_id=self.leader_id or "")
 
         return cluster_pb2.ClientResponseMsg(success=False, message="Operação não implementada")
 
@@ -395,8 +335,19 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             except Exception as e:
                 print(f"[{self.node_id}] !!! ERRO no timer de eleição: {e}")
 
+    def _send_vote_request(self, target_id, term):
+        try:
+            stub = self._get_stub(target_id)
+            with self.lock:
+                last_idx, last_term = last_log_idx_term(self.log)
+            return stub.RequestVote(cluster_pb2.VoteRequest(
+                term=term, candidate_id=self.node_id,
+                last_log_index=last_idx, last_log_term=last_term
+            ), timeout=0.3)
+        except Exception:
+            return None
+
     def _start_election(self):
-        """Inicia uma eleição para se tornar líder."""
         with self.lock:
             if self.role == "LIDER" or self.election_in_progress:
                 return
@@ -406,7 +357,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             self.voted_for = self.node_id
             self.leader_id = ""
             self.last_heartbeat_time = time.time()
-            self.election_timeout = random.uniform(0.4, 1.2)
+            self.election_timeout = random.uniform(*self.ELECTION_RANGE)
             self._save_state()
             term = self.current_term
             print(f"[{self.node_id}] >>> Iniciando ELEIÇÃO Termo {term} <<<")
@@ -414,21 +365,9 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         votes = 1
         won = False
         try:
-            def request_vote_worker(target_id):
-                try:
-                    stub = self._get_stub(target_id)
-                    with self.lock:
-                        last_idx = self.log[-1].index if self.log else 0
-                        last_term = self.log[-1].term if self.log else 0
-                    return stub.RequestVote(cluster_pb2.VoteRequest(
-                        term=term, candidate_id=self.node_id,
-                        last_log_index=last_idx, last_log_term=last_term
-                    ), timeout=0.3)
-                except Exception:
-                    return None
-
             executor = futures.ThreadPoolExecutor(max_workers=3)
-            fs = [executor.submit(request_vote_worker, nid) for nid in self.config if nid != self.node_id]
+            fs = [executor.submit(self._send_vote_request, nid, term)
+                  for nid in self.config if nid != self.node_id]
             for fut in futures.as_completed(fs):
                 if won:
                     break
@@ -481,8 +420,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                         if self.leader_id and self.leader_id != target_id:
                             break
                         term = self.current_term
-                        last_idx = self.log[-1].index if self.log else 0
-                        last_term = self.log[-1].term if self.log else 0
+                        last_idx, last_term = last_log_idx_term(self.log)
 
                     try:
                         stub = self._get_stub(target_id)
@@ -509,7 +447,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                                         self._append_entry_from_leader(entry)
                                     else:
                                         print(f"[{self.node_id}] ERRO: gap (esperado {len(self.log)+1}, "
-                                            f"recebido {entry.index})")
+                                              f"recebido {entry.index})")
                                         break
 
                                 # Atualiza commit
@@ -548,7 +486,8 @@ def run_server(node_id):
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     node_instance.start_background_threads()
-    print(f"=== Node {node_id} @ {config[node_id]} | Termo={node_instance.current_term} Commit={node_instance.commit_index} Log={len(node_instance.log)} ===")
+    print(f"=== Node {node_id} @ {config[node_id]} | Termo={node_instance.current_term} "
+          f"Commit={node_instance.commit_index} Log={len(node_instance.log)} ===")
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
