@@ -512,10 +512,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                                 for entry in response.entries:
                                     if entry.index == len(self.log) + 1:
                                         self._append_entry_from_leader(entry)
-                                    elif entry.index <= len(self.log):
-                                        if self.log[entry.index - 1].term != entry.term:
-                                            print(f"[{self.node_id}] AVISO: divergência idx={entry.index}")
-                                            break
                                     else:
                                         print(f"[{self.node_id}] ERRO: gap (esperado {len(self.log)+1}, "
                                             f"recebido {entry.index})")
@@ -535,9 +531,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
                                 if response.conflict_index < len(self.log):
                                     self._truncate_log(response.conflict_index)
-                                else:
-                                    print(f"[{self.node_id}] Mismatch sem truncamento "
-                                        f"(conflict={response.conflict_index}, len={len(self.log)})")
                                 break
                     except Exception:
                         continue
