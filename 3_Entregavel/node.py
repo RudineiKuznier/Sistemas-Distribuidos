@@ -37,7 +37,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         self.running = True
 
         self.channels = {}        # cache de canais gRPC
-        self.fetch_failures = {}  # contador de falhas por peer
 
         # Tracking de replicação
         self.followers_match = {} # {follower_id: match_index}
@@ -498,7 +497,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                         ), timeout=0.12)
 
                         with self.lock:
-                            self.fetch_failures[target_id] = 0
                             if response.term > self.current_term:
                                 self._update_term(response.term)
                                 break
@@ -542,13 +540,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                                         f"(conflict={response.conflict_index}, len={len(self.log)})")
                                 break
                     except Exception:
-                        with self.lock:
-                            self.fetch_failures[target_id] = self.fetch_failures.get(target_id, 0) + 1
-                            # Após 3 falhas consecutivas no líder, esquece-o para forçar redescoberta
-                            if self.fetch_failures[target_id] >= 3 and self.leader_id == target_id:
-                                print(f"[{self.node_id}] Líder {target_id} inativo. Limpando leader_id.")
-                                self.leader_id = ""
-                                self.fetch_failures[target_id] = 0
                         continue
             except Exception as e:
                 print(f"[{self.node_id}] !!! ERRO no fetch loop: {e}")
