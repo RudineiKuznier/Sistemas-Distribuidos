@@ -15,9 +15,9 @@ class ClusterClient:
             self.channels[node_id] = grpc.insecure_channel(self.config[node_id])
         return cluster_pb2_grpc.NodeServiceStub(self.channels[node_id])
 
-    def request(self, msg, redirect=True, max_attempts=3):
+    def request(self, msg, redirect=True):
         last_response = None
-        for attempt in range(max_attempts):
+        for attempt in range(3):
             try:
                 response = self._stub(self.current).ClientRequest(msg)
             except Exception as e:
@@ -25,24 +25,12 @@ class ClusterClient:
                 return None
             last_response = response
 
-            if not redirect:
-                return response
-
-            if response.success:
+            if not redirect or response.success:
                 return response
 
             if response.leader_id and response.leader_id != self.current:
                 print(f"  [redirect] {self.current} → {response.leader_id}")
                 self.current = response.leader_id
-                continue
-
-            if not response.leader_id:
-                # Sem líder conhecido: round-robin
-                for nid in self.config:
-                    if nid != self.current:
-                        print(f"  [round-robin] {self.current} → {nid}")
-                        self.current = nid
-                        break
                 continue
 
             return response
