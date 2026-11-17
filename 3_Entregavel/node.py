@@ -112,6 +112,27 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             f.write(json.dumps({"term": entry.term, "index": entry.index, "command": entry.command}) + "\n")
         self.log.append(entry)
 
+    def _truncate_log(self, new_len):
+        """Trunca o log em memória, reescreve log.jsonl e limita commit_index."""
+        if new_len >= len(self.log):
+            return
+
+        old_len = len(self.log)
+        self.log = self.log[:new_len]
+
+        log_file = os.path.join(self.data_dir, "log.jsonl")
+        with open(log_file, "w") as f:
+            for entry in self.log:
+                f.write(json.dumps({
+                    "term": entry.term, "index": entry.index, "command": entry.command
+                }) + "\n")
+
+        if self.commit_index > new_len:
+            self.commit_index = new_len
+            self._save_state()
+
+        print(f"[{self.node_id}] TRUNCOU log: {old_len} → {new_len} entradas")   
+
     def _get_stub(self, target_id):
         if target_id not in self.channels:
             self.channels[target_id] = grpc.insecure_channel(self.config[target_id])
@@ -233,7 +254,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             return cluster_pb2.VoteResponse(term=self.current_term, vote_granted=True)
 
     def Fetch(self, request, context):
-        """RPC para que seguidores descubram o líder e recebam atualizações de log."""
         with self.lock:
             if request.term > self.current_term:
                 self._update_term(request.term)
@@ -249,27 +269,44 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
 
             # Sou líder
             self.last_fetch_from[request.follower_id] = time.time()
+            L = request.last_log_index
+            T = request.last_log_term
 
-            # Fail-safe de divergência (Etapa 6 fará o tratamento real)
-            if request.last_log_index > len(self.log):
-                print(f"[{self.node_id}] AVISO: {request.follower_id} à frente ({request.last_log_index}>{len(self.log)})")
+            # CASO 1: follower à frente -> trunca até o tamanho do líder
+            if L > len(self.log):
+                conflict = len(self.log)
+                print(f"[{self.node_id}] LOG_MISMATCH {request.follower_id} à frente "
+                    f"(L={L} > len={len(self.log)}) → conflict={conflict}")
                 return cluster_pb2.FetchResponse(
-                    term=self.current_term, success=True,
-                    leader_id=self.node_id, commit_index=self.commit_index, entries=[]
-                )
-            if request.last_log_index > 0 and \
-               self.log[request.last_log_index - 1].term != request.last_log_term:
-                print(f"[{self.node_id}] AVISO: divergência em {request.follower_id} idx={request.last_log_index}")
-                return cluster_pb2.FetchResponse(
-                    term=self.current_term, success=True,
-                    leader_id=self.node_id, commit_index=self.commit_index, entries=[]
+                    term=self.current_term, success=False,
+                    conflict_index=conflict,
+                    leader_id=self.node_id,
+                    commit_index=self.commit_index
                 )
 
-            # Consistente: atualiza match e tenta avançar commit
-            self.followers_match[request.follower_id] = request.last_log_index
+            # CASO 2: divergência de termo em L
+            if L > 0 and self.log[L - 1].term != T:
+                # Primeiro índice do nosso log com termo > T (follower trunca até lá)
+                conflict = 0
+                for i in range(L):
+                    if self.log[i].term > T:
+                        conflict = i
+                        break
+                print(f"[{self.node_id}] LOG_MISMATCH {request.follower_id} "
+                    f"(L={L}, T={T}) vs log[L-1].term={self.log[L-1].term} "
+                    f"→ conflict={conflict}")
+                return cluster_pb2.FetchResponse(
+                    term=self.current_term, success=False,
+                    conflict_index=conflict,
+                    leader_id=self.node_id,
+                    commit_index=self.commit_index
+                )
+
+            # CASO 3: consistente
+            self.followers_match[request.follower_id] = L
             self._advance_commit()
 
-            entries = self.log[request.last_log_index:]
+            entries = self.log[L:]
             return cluster_pb2.FetchResponse(
                 term=self.current_term, success=True,
                 leader_id=self.node_id, commit_index=self.commit_index,
@@ -480,6 +517,8 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                             if response.term > self.current_term:
                                 self._update_term(response.term)
                                 break
+
+                            # Follower consistente com líder
                             if response.success and response.leader_id:
                                 if self.leader_id != response.leader_id:
                                     print(f"[{self.node_id}] Descobriu LÍDER: {response.leader_id}")
@@ -492,15 +531,30 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                                         self._append_entry_from_leader(entry)
                                     elif entry.index <= len(self.log):
                                         if self.log[entry.index - 1].term != entry.term:
-                                            print(f"[{self.node_id}] AVISO: divergência idx={entry.index} (adiado p/ Etapa 6)")
+                                            print(f"[{self.node_id}] AVISO: divergência idx={entry.index}")
                                             break
                                     else:
-                                        print(f"[{self.node_id}] ERRO: gap (esperado {len(self.log)+1}, recebido {entry.index})")
+                                        print(f"[{self.node_id}] ERRO: gap (esperado {len(self.log)+1}, "
+                                            f"recebido {entry.index})")
                                         break
 
                                 # Atualiza commit
                                 if response.commit_index > self.commit_index:
                                     self._apply_committed_to_db(response.commit_index)
+                                break
+
+                            # LOG_MISMATCH: respondente é o próprio líder
+                            elif not response.success and response.leader_id == target_id:
+                                if self.leader_id != response.leader_id:
+                                    print(f"[{self.node_id}] Descobriu LÍDER: {response.leader_id}")
+                                self.leader_id = response.leader_id
+                                self.last_heartbeat_time = time.time()
+
+                                if response.conflict_index < len(self.log):
+                                    self._truncate_log(response.conflict_index)
+                                else:
+                                    print(f"[{self.node_id}] Mismatch sem truncamento "
+                                        f"(conflict={response.conflict_index}, len={len(self.log)})")
                                 break
                     except Exception:
                         with self.lock:
