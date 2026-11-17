@@ -409,69 +409,81 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
             if not won:
                 print(f"[{self.node_id}] Eleição Termo {term} falhou (votos={votes})")
 
+    """
+    Loop de fetch dividido em funções menores para facilitar a leitura:
+    - _follower_fetch_loop: orquestração do loop
+    - _fetch_targets: determina destinos do próximo Fetch
+    - _try_fetch: RPC e tratamento de erros
+    - _handle_fetch_response: despacha resposta do Fetch (termo maior / consistente / LOG_MISMATCH)
+    - _on_fetch_consistent: aplica novas entries e avança commit (follower em sincronia)
+    - _on_log_mismatch: trunca até conflict_index (follower divergente)
+    """
+
     def _follower_fetch_loop(self):
-        """Loop que seguidores usam para descobrir o líder e receber atualizações de log."""
+        """Loop principal: a cada 100ms tenta um Fetch em cada destino."""
         while self.running:
             time.sleep(0.1)
             try:
-                with self.lock:
-                    if self.role != "SEGUIDOR":
-                        continue
-                    if self.leader_id and self.leader_id != self.node_id:
-                        targets = [self.leader_id]
-                    else:
-                        targets = [nid for nid in self.config if nid != self.node_id]
-
-                for target_id in targets:
-                    with self.lock:
-                        if self.role != "SEGUIDOR":
-                            break
-                        if self.leader_id and self.leader_id != target_id:
-                            break
-                        term = self.current_term
-                        last_idx, last_term = last_log_idx_term(self.log)
-
-                    try:
-                        stub = self._get_stub(target_id)
-                        response = stub.Fetch(cluster_pb2.FetchRequest(
-                            term=term, follower_id=self.node_id,
-                            last_log_index=last_idx, last_log_term=last_term
-                        ), timeout=0.12)
-
-                        with self.lock:
-                            if response.term > self.current_term:
-                                self._update_term(response.term)
-                                break
-
-                            # Follower consistente com líder
-                            if response.success and response.leader_id:
-                                self._adopt_leader(response.leader_id)
-
-                                # Aplica novas entradas
-                                for entry in response.entries:
-                                    if entry.index == len(self.log) + 1:
-                                        self._append_entry_from_leader(entry)
-                                    else:
-                                        print(f"[{self.node_id}] ERRO: gap (esperado {len(self.log)+1}, "
-                                              f"recebido {entry.index})")
-                                        break
-
-                                # Atualiza commit
-                                if response.commit_index > self.commit_index:
-                                    self._apply_committed_to_db(response.commit_index)
-                                break
-
-                            # LOG_MISMATCH: respondente é o próprio líder
-                            elif not response.success and response.leader_id == target_id:
-                                self._adopt_leader(response.leader_id)
-
-                                if response.conflict_index < len(self.log):
-                                    self._truncate_log(response.conflict_index)
-                                break
-                    except Exception:
-                        continue
+                for target_id in self._fetch_targets():
+                    self._try_fetch(target_id)
             except Exception as e:
                 print(f"[{self.node_id}] !!! ERRO no fetch loop: {e}")
+
+    def _fetch_targets(self):
+        """Destinos do próximo Fetch: líder conhecido, ou todos se ainda não descobrimos."""
+        with self.lock:
+            if self.role != "SEGUIDOR":
+                return []
+            if self.leader_id and self.leader_id != self.node_id:
+                return [self.leader_id]
+            return [nid for nid in self.config if nid != self.node_id]
+
+    def _try_fetch(self, target_id):
+        """Envia FetchRequest e despacha a resposta. Ignora erros de rede."""
+        with self.lock:
+            if self.role != "SEGUIDOR":
+                return
+            if self.leader_id and self.leader_id != target_id:
+                return
+            term = self.current_term
+            last_idx, last_term = last_log_idx_term(self.log)
+        try:
+            response = self._get_stub(target_id).Fetch(cluster_pb2.FetchRequest(
+                term=term, follower_id=self.node_id,
+                last_log_index=last_idx, last_log_term=last_term
+            ), timeout=0.12)
+        except Exception:
+            return
+        self._handle_fetch_response(response, target_id)
+
+    def _handle_fetch_response(self, response, target_id):
+        """Despacha: termo maior / consistente / LOG_MISMATCH."""
+        with self.lock:
+            if response.term > self.current_term:
+                self._update_term(response.term)
+                return
+            if response.success:
+                self._on_fetch_consistent(response)
+            elif response.leader_id == target_id:
+                self._on_log_mismatch(response)
+
+    def _on_fetch_consistent(self, response):
+        """Aplica novas entries e avança commit (follower em sincronia)."""
+        self._adopt_leader(response.leader_id)
+        for entry in response.entries:
+            if entry.index == len(self.log) + 1:
+                self._append_entry_from_leader(entry)
+            else:
+                print(f"[{self.node_id}] ERRO: gap esperado {len(self.log)+1}, veio {entry.index}")
+                break
+        if response.commit_index > self.commit_index:
+            self._apply_committed_to_db(response.commit_index)
+
+    def _on_log_mismatch(self, response):
+        """Trunca até conflict_index (follower divergente)."""
+        self._adopt_leader(response.leader_id)
+        if response.conflict_index < len(self.log):
+            self._truncate_log(response.conflict_index)
 
     def start_background_threads(self):
         """Inicia os loops de eleição e fetch em threads separadas."""
