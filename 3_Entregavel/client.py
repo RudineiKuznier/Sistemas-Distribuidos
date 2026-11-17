@@ -4,18 +4,60 @@ import sys
 import cluster_pb2
 import cluster_pb2_grpc
 
+class ClusterClient:
+    def __init__(self, config, initial_node):
+        self.config = config
+        self.current = initial_node
+        self.channels = {}
+
+    def _stub(self, node_id):
+        if node_id not in self.channels:
+            self.channels[node_id] = grpc.insecure_channel(self.config[node_id])
+        return cluster_pb2_grpc.NodeServiceStub(self.channels[node_id])
+
+    def request(self, msg, redirect=True, max_attempts=3):
+        last_response = None
+        for attempt in range(max_attempts):
+            try:
+                response = self._stub(self.current).ClientRequest(msg)
+            except Exception as e:
+                print(f"  [erro] {self.current}: {e}")
+                return None
+            last_response = response
+
+            if not redirect:
+                return response
+
+            if response.success:
+                return response
+
+            if response.leader_id and response.leader_id != self.current:
+                print(f"  [redirect] {self.current} → {response.leader_id}")
+                self.current = response.leader_id
+                continue
+
+            if not response.leader_id:
+                # Sem líder conhecido: round-robin
+                for nid in self.config:
+                    if nid != self.current:
+                        print(f"  [round-robin] {self.current} → {nid}")
+                        self.current = nid
+                        break
+                continue
+
+            return response
+        return last_response
+
+
 def run_client():
     with open("config.json") as f:
         config = json.load(f)
 
-    target_node_id = sys.argv[1]
-    target_address = config[target_node_id]
+    initial_node = sys.argv[1]
+    cli = ClusterClient(config, initial_node)
 
-    channel = grpc.insecure_channel(target_address)
-    stub = cluster_pb2_grpc.NodeServiceStub(channel)
-
-    print(f"--- Cliente conectando ao {target_node_id} ({target_address}) ---")
-    print("Comandos: PING, STATUS, PUT <chave> <valor>, TEST_COMMIT, SAIR")
+    print(f"--- Cliente conectado a {initial_node} ({config[initial_node]}) ---")
+    print("Comandos: PING, STATUS, PUT <chave> <valor>, GET <chave>, SAIR")
 
     while True:
         try:
@@ -23,16 +65,22 @@ def run_client():
             if not cmd:
                 continue
             
-            operation = cmd[0].upper()
-            if operation == "SAIR":
+            op = cmd[0].upper()
+            if op == "SAIR":
                 break
 
             key = cmd[1] if len(cmd) > 1 else ""
             value = cmd[2] if len(cmd) > 2 else ""
 
-            response = stub.ClientRequest(cluster_pb2.ClientRequestMsg(operation=operation, key=key, value=value))
-            
-            print(f"Resposta: Success={response.success} | Msg={response.message} | Líder={response.leader_id}")
+            msg = cluster_pb2.ClientRequestMsg(operation=op, key=key, value=value)
+            redirect = (op == "PUT")
+            response = cli.request(msg, redirect=redirect)
+
+            if response is None:
+                continue
+
+            extra = f" | Value={response.value}" if response.value else ""
+            print(f"Resposta: Success={response.success} | Msg={response.message} | Líder={response.leader_id}{extra}")
 
         except KeyboardInterrupt:
             break
