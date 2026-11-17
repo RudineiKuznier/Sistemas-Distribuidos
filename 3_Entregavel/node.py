@@ -151,11 +151,6 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
         self.followers_match.clear()
         self.last_fetch_from.clear()
 
-    def _on_become_leader(self):
-        print(f"[{self.node_id}] Assumiu liderança. Aguardando FetchRequests para reconstruir quórum.")
-        self.followers_match.clear()
-        self.last_fetch_from.clear()
-
     # ----- Commit & aplicação -----
 
     def _advance_commit(self):
@@ -453,7 +448,7 @@ class NodeService(cluster_pb2_grpc.NodeServiceServicer):
                             self.leader_id = self.node_id
                             self.last_heartbeat_time = time.time()
                             self._save_state()
-                            self._on_become_leader()
+                            print(f"[{self.node_id}] Assumiu liderança. Aguardando FetchRequests.")
                             print(f"[{self.node_id}] ### ELEITO LÍDER (Termo {term}) ###")
                             won = True
                             break
